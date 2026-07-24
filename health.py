@@ -17,15 +17,14 @@ class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path not in ("/", "/health"):
             self.send_response(404)
+            self.send_header("Content-Type", "text/plain")
             self.end_headers()
             return
-
         try:
             with open(self.status_file, 'r') as f:
                 data = json.load(f)
         except (FileNotFoundError, json.JSONDecodeError):
             data = {"alive": False, "error": "status file not found"}
-
         body = json.dumps(data)
         self.send_response(200 if data.get("alive") else 503)
         self.send_header("Content-Type", "application/json")
@@ -35,7 +34,7 @@ class HealthHandler(BaseHTTPRequestHandler):
 
 
 def start_health_server(port: int) -> HTTPServer:
-    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    server = HTTPServer(("127.0.0.1", port), HealthHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True, name="health-server")
     thread.start()
     logging.info(f"Health endpoint started on port {port}")

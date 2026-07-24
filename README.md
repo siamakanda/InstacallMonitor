@@ -35,45 +35,21 @@ pip install -r requirements.txt
 python menu.py
 ```
 
-## Move to Another Device
-
-The repo is self-contained. Just clone, create `.env`, and run:
-
-```bash
-git clone https://github.com/siamakanda/InstacallMonitor.git
-cd InstacallMonitor
-cp .env.example .env       # then edit with your credentials
-python -m venv venv && source venv/bin/activate   # or: venv\Scripts\activate on Windows
-pip install -r requirements.txt
-python menu.py
-```
-
-All settings are stored in `settings.json` and `profiles.json`. Copy those files if you want to carry your configuration to a new device. The database (`instacallmonitor.db`) and logs stay local.
-
-## Docker
-
-```bash
-docker compose up -d
-```
-
-Attach to the interactive menu:
-```bash
-docker attach instacallmonitor
-```
-
 ## Features
 
 - **Balance monitoring** — polls customer edit pages, alerts when balance drops below threshold
 - **Margin & Billed Min monitoring** — scrapes the Executive Summary report for per-customer margin and billed minutes
-- **Async parallel quick checks** — fetch all balances concurrently (menu option 0)
+- **Per-customer thresholds** — global defaults + per-customer overrides for balance, margin, and billed min
+- **Escalation** — two-tier thresholds (primary + rearm) with persistent alert state across restarts
+- **Async parallel quick checks** — fetch all balances concurrently via aiohttp
 - **Dual siren patterns** — rising/falling sweep (balance) vs alternating two-tone (margin)
 - **Non-blocking alerts** — sirens play in background threads, monitoring continues
 - **Desktop notifications** — Windows toast notifications via `plyer`
 - **Webhook alerts** — Telegram and Slack webhook support with HTML formatting
 - **Alert cooldown** — configurable cooldown per customer to prevent alert storms
-- **SQLite history** — persistent balance and margin history with auto-retention
+- **SQLite history** — persistent balance, margin, and alert_state tables with auto-retention
 - **CSV export** — export balance/margin history for reporting
-- **Named profiles** — save/load multiple config profiles (e.g. weekday, weekend, high-alert)
+- **Named profiles** — save/load multiple config profiles
 - **Active hours scheduling** — limit monitoring to specific days and time windows
 - **Health HTTP endpoint** — Uptime Kuma / Prometheus compatible (`GET /health`)
 - **JSON logging** — toggle structured JSON log output
@@ -82,6 +58,10 @@ docker attach instacallmonitor
 - **Priority-aware display** — balance lines `[B]`, margin lines `[M]`, monitored flag
 
 ## Usage
+
+```bash
+python menu.py
+```
 
 ```
   InstacallMonitor  v2.0
@@ -144,57 +124,84 @@ docker attach instacallmonitor
 
 ## Settings
 
-All configurable via menu option 5 or by editing `settings.json`:
+Settings live in `settings.toml` (TOML format). Edit directly or use the TUI menu (option 5).
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `customer_ids` | `["18"]` | Monitored customer IDs |
-| `check_interval_seconds` | `600` | Seconds between cycles |
-| `balance_threshold` | `-365.0` | Alert when balance drops below |
-| `margin_threshold` | `30.0` | Alert when margin drops below % |
-| `billed_min_threshold` | `70.0` | Only alert if billed minutes exceed |
-| `request_timeout` | `10` | HTTP request timeout (seconds) |
-| `summary_direction` | `outbound` | Summary report direction |
-| `summary_interval` | `5m` | Summary report time window |
-| `audio_enabled` | `true` | Enable/disable siren |
-| `alert_cooldown_seconds` | `300` | Minimum seconds between alerts per customer |
-| `db_retention_days` | `30` | Auto-purge history older than N days (0=keep all) |
-| `webhook_url` | `""` | Slack or Telegram webhook URL |
-| `webhook_type` | `none` | `none`, `telegram`, or `slack` |
-| `telegram_chat_id` | `""` | Telegram chat ID for alerts |
-| `active_hours_start` | `""` | HH:MM start (empty=24/7) |
-| `active_hours_end` | `""` | HH:MM end (empty=24/7) |
-| `active_days` | `""` | `mon,tue,wed,thu,fri` (empty=all) |
-| `health_port` | `0` | Health HTTP server port (0=disabled) |
-| `logging_json` | `false` | JSON structured log output |
-| `siren_loops` | `10` | Siren sweep loops |
-| `siren_min_freq` | `2200` | Lowest siren frequency (Hz) |
-| `siren_max_freq` | `3500` | Highest siren frequency (Hz) |
-| `siren_step_freq` | `130` | Frequency step between beeps |
-| `siren_tone_duration` | `50` | Duration of each beep (ms) |
+### Application settings (`[settings]`)
+
+```toml
+[settings]
+check_interval = 600              # seconds between monitoring cycles
+request_timeout = 10              # HTTP request timeout (seconds)
+cooldown = 300                    # minimum seconds between alerts per customer
+audio = true                      # enable audible siren alerts
+summary_direction = "outbound"    # "outbound" or "inbound"
+summary_interval = "5m"           # "5m", "10m", "15m", "1h", etc.
+summary_show_all = false          # show all customers in summary output
+webhook_type = "none"             # "none", "telegram", or "slack"
+webhook_url = ""                  # Slack/Telegram webhook URL
+telegram_chat_id = ""             # Telegram chat ID
+active_hours_start = ""           # HH:MM (empty = 24/7)
+active_hours_end = ""
+active_days = ""                  # mon,tue,wed,thu,fri (empty = all)
+db_retention_days = 30            # auto-purge (0 = keep forever)
+health_port = 0                   # 0 = disabled, e.g. 8081 for Uptime Kuma
+
+# Global defaults (applied to ALL customers in summary report)
+margin_below = 30.0               # alert when margin drops below this %
+margin_critical = 25.0            # escalation at lower threshold
+billed_above = 70.0               # only alert if billed minutes exceed this
+```
+
+### Monitored customers (`[[watch]]`)
+
+Each block specifies a customer with its own balance threshold. All other fields are optional global overrides.
+
+```toml
+[[watch]]
+customer = "18"
+name = "ACME Corp"
+balance_below = -500.0            # REQUIRED — balance alert for this customer
+# balance_critical = -600.0       # optional escalation
+
+[[watch]]
+customer = "42"
+name = "GlobalTel"
+balance_below = -200.0            # different threshold per customer
+margin_below = 25.0               # override global margin for this customer
+# billed_above = 100.0            # override global billed-min for this customer
+```
+
+### How overrides resolve
+
+| Field | Priority |
+|---|---|
+| `balance_below` | **Per-customer only** — no global default, must be set in `[[watch]]` |
+| `balance_critical` | Per-customer → default is same as that customer's `balance_below` (no escalation) |  
+| `margin_below` | Per-customer override → `[settings]` global default |
+| `margin_critical` | Per-customer override → `[settings]` global default |
+| `billed_above` | Per-customer override → `[settings]` global default |
 
 ## Architecture
 
 ```
 InstacallMonitor/
-  menu.py          — CLI entry point (interactive menu)
-  config.py        — Settings dataclass, validation, logging, profiles
-  auth.py          — CSRF login, session creation, re-auth helper
-  scrapers.py      — fetch_balance (customer page), fetch_summary_report
-  monitor.py       — Continuous loop with scheduling, dedup, crash recovery
-  quick.py         — One-shot balance/summary/full/parallel checks
-  async_fetch.py   — aiohttp parallel balance + summary fetchers
-  alerts.py        — SirenManager, desktop notifications, webhook dispatch
-  display.py       — Console formatting ([B]/[M] prefixes)
-  retry.py         — Retry with 2s/5s backoff on transient failures
-  persistence.py   — SQLite ORM (insert, query, purge, dedup helpers)
-  notifications.py — Telegram/Slack webhook sender
-  health.py        — HTTP health endpoint (/health returns monitor.status)
-  export.py        — CSV export for balance/margin history
-  settings.json    — Runtime configuration
-  profiles.json    — Named config profiles
-  .env             — Portal credentials (never committed)
-  tests/           — 35 pytest tests
+  menu.py              — Single CLI entry point (interactive menu)
+  config.py            — Settings dataclasses, TOML load/save, validation, profiles
+  auth.py              — CSRF login, session creation, re-auth helper
+  scrapers.py          — Shared HTML parser + fetch_balance + fetch_summary_report
+  monitor.py           — Continuous loop with scheduling, per-customer thresholds, crash recovery
+  quick.py             — One-shot checks (sync + async parallel with retry)
+  alerts.py            — SirenManager, AlertStateManager, notifications, trigger functions
+  display.py           — Console formatting ([B]/[M] prefixes)
+  retry.py             — Retry with 2s/5s backoff on transient failures
+  persistence.py       — SQLite ORM (balance, margin, alert_state tables)
+  notifications.py     — Telegram/Slack webhook sender
+  export.py            — CSV export for balance/margin history
+  health.py            — HTTP health endpoint (/health returns monitor.status)
+  settings.toml        — Runtime configuration (global + per-customer overrides)
+  profiles.json        — Named config profiles
+  .env                 — Portal credentials (never committed)
+  tests/               — 43 pytest tests
 ```
 
 ## Files (Runtime)
@@ -203,7 +210,9 @@ InstacallMonitor/
 |------|---------|
 | `balance_monitor.log` | Rotating log (5 files x 1 MB) |
 | `monitor.status` | JSON health status (alive, last_check, error_count) |
-| `instacallmonitor.db` | SQLite database — balance + margin history |
+| `instacallmonitor.db` | SQLite database — balance + margin + alert_state history |
+| `instacallmonitor.db-shm` | SQLite WAL shared memory |
+| `instacallmonitor.db-wal` | SQLite WAL journal |
 
 ## Requirements
 

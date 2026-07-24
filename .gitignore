@@ -53,3 +53,7 @@ margin_export_*.csv
 
 # Docker
 docker-compose.override.yml
+
+# Runtime artifacts
+output.txt
+settings.toml

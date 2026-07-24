@@ -10,15 +10,24 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import config
 import persistence
-from persistence import BalanceRecord, MarginRecord, init_db, insert_balance, insert_margin, get_balance_history, get_margin_history
+from persistence import (
+    BalanceRecord,
+    MarginRecord,
+    get_balance_history,
+    get_margin_history,
+    init_db,
+    insert_balance,
+    insert_margin,
+)
 
 
 @pytest.fixture
 def temp_db(monkeypatch: pytest.MonkeyPatch) -> str:
     fd, path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
-    monkeypatch.setattr(persistence, "DB_FILE", path)
+    monkeypatch.setattr(config, "DB_FILE", path)
     init_db()
     yield path
     try:

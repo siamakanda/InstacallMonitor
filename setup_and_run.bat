@@ -43,19 +43,11 @@ if exist requirements.txt (
 )
 
 echo ============================================================
-echo [+] Setup complete. Launching Monitoring Tool...
+echo [+] Setup complete. Launching InstacallMonitor...
 echo ============================================================
 echo.
-echo   Menu options:
-echo     0 - Quick Check Parallel (Async)
-echo     1 - Start Monitor
-echo     2 - Quick Balances
-echo     3 - Quick Summary
-echo     5 - Settings
-echo     6 - Profiles
-echo     7 - History
-echo     8 - Export
-echo     9 - Exit
+echo   Dashboard controls:
+echo     Q - Quit    S - Toggle monitor    R - Refresh
 echo.
 venv\Scripts\python.exe menu.py
 

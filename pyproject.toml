@@ -1,7 +1,7 @@
 [project]
 name = "InstacallMonitor"
-version = "2.0.0"
-description = "InstacallMonitor — Real-time balance and margin monitoring for Instacall Switch Portal"
+version = "3.0.0"
+description = "InstacallMonitor — Real-time balance and margin monitoring for Instacall Switch Portal. Per-customer thresholds with TOML config."
 requires-python = ">=3.10"
 dependencies = [
     "beautifulsoup4>=4.12.3",
@@ -9,6 +9,7 @@ dependencies = [
     "requests>=2.32.3",
     "plyer>=2.1.0",
     "aiohttp>=3.9.0",
+    "tomli>=2.0",
 ]
 
 [project.optional-dependencies]

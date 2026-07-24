@@ -1,18 +1,19 @@
 from __future__ import annotations
 
-import logging
-from typing import Callable, Optional, TypeVar
-
 import requests
-from bs4 import BeautifulSoup
 
-from config import HEADERS, LOGIN_URL, Settings, get_credentials
+from config import HEADERS, LOGIN_URL, get_credentials
 
-T = TypeVar("T")
+
+def create_session() -> requests.Session:
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    return session
 
 
 def perform_login(session: requests.Session, timeout: int = 10) -> bool:
     username, password = get_credentials()
+    from bs4 import BeautifulSoup
     try:
         login_init = session.get(LOGIN_URL, timeout=timeout)
         soup_login = BeautifulSoup(login_init.text, 'html.parser')
@@ -23,20 +24,17 @@ def perform_login(session: requests.Session, timeout: int = 10) -> bool:
         login_response = session.post(LOGIN_URL, data=login_data, timeout=timeout)
 
         if login_response.status_code in [200, 302]:
+            import logging
             logging.info("Login successful.")
             return True
         else:
+            import logging
             logging.error(f"Login failed with HTTP {login_response.status_code}")
             return False
     except Exception as e:
+        import logging
         logging.error(f"Login exception: {e}")
         return False
-
-
-def create_session() -> requests.Session:
-    session = requests.Session()
-    session.headers.update(HEADERS)
-    return session
 
 
 def ensure_authenticated(
@@ -44,9 +42,9 @@ def ensure_authenticated(
     response: requests.Response,
     timeout: int = 10,
 ) -> bool:
-    """Check if response points to login page; if so, re-authenticate. Returns True if still valid."""
     if "login" not in response.url.lower():
         return True
+    import logging
     logging.warning("Session expired. Re-logging in...")
     return perform_login(session, timeout)
 
@@ -54,10 +52,10 @@ def ensure_authenticated(
 def with_session_refresh(
     session: requests.Session,
     timeout: int,
-    fn: Callable[[], requests.Response],
+    fn,
     max_attempts: int = 2,
-) -> requests.Response:
-    """Call fn(); if redirected to login, refresh session and retry once."""
+):
+    import logging
     for attempt in range(max_attempts):
         resp = fn()
         if "login" not in resp.url.lower():
