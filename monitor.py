@@ -1,388 +1,339 @@
 from __future__ import annotations
 
-import logging
-import threading
+import sys
 import time
-import traceback
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Optional
 
-import requests
-
-from alerts import _alert_state, _siren_manager, trigger_balance_alert, trigger_margin_alert, trigger_recovery_alert
-from auth import create_session, perform_login
-from config import Settings, write_status
-from display import bold, cyan, dim, fmt_pct, green, print_balance_line, print_summary_line, red, yellow
-from health import start_health_server
-from persistence import BalanceRecord, MarginRecord, init_db, insert_balance, insert_margin, purge_old_records
+import auth
+from alerts import SirenManager, check_balance_alert, check_margin_alert
+from config import (
+    Settings,
+    get_credentials,
+    load_settings,
+    setup_logging,
+    validate_settings,
+)
+from display import bold, dim, green, print_balance_line, print_summary_line, red, yellow
+from persistence import (
+    BalanceRecord,
+    MarginRecord,
+    export_balance_csv,
+    export_margin_csv,
+    init_db,
+    insert_balance,
+    insert_margin,
+    purge_old_records,
+)
 from scrapers import fetch_balance, fetch_summary_report
 
 
-def is_within_active_hours(
-    start: str, end: str, days: str, now: Optional[datetime] = None
-) -> bool:
-    if not start and not end:
-        return True
-    if now is None:
-        now = datetime.now()
-    if days:
-        day_map = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
-        allowed = set()
-        for part in days.lower().replace(" ", "").split(","):
-            if part in day_map:
-                allowed.add(day_map[part])
-        if allowed and now.weekday() not in allowed:
-            return False
-    if start and end:
-        try:
-            start_h, start_m = map(int, start.split(":"))
-            end_h, end_m = map(int, end.split(":"))
-            now_minutes = now.hour * 60 + now.minute
-            start_minutes = start_h * 60 + start_m
-            end_minutes = end_h * 60 + end_m
-            if start_minutes <= end_minutes:
-                if not (start_minutes <= now_minutes < end_minutes):
-                    return False
-            else:
-                if not (now_minutes >= start_minutes or now_minutes < end_minutes):
-                    return False
-        except (ValueError, IndexError):
-            return True
-    return True
+def _parse_args() -> dict[str, object]:
+    args: dict[str, object] = {}
+    argv = sys.argv[1:]
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--interval" and i + 1 < len(argv):
+            try:
+                args["interval"] = int(argv[i + 1])
+            except ValueError:
+                pass
+            i += 2
+        elif a == "--balance-below" and i + 1 < len(argv):
+            try:
+                args["balance_below"] = float(argv[i + 1])
+            except ValueError:
+                pass
+            i += 2
+        elif a == "--margin-below" and i + 1 < len(argv):
+            try:
+                args["margin_below"] = float(argv[i + 1])
+            except ValueError:
+                pass
+            i += 2
+        elif a == "--billed-above" and i + 1 < len(argv):
+            try:
+                args["billed_above"] = float(argv[i + 1])
+            except ValueError:
+                pass
+            i += 2
+        elif a == "--cooldown" and i + 1 < len(argv):
+            try:
+                args["cooldown"] = int(argv[i + 1])
+            except ValueError:
+                pass
+            i += 2
+        elif a == "--quiet":
+            args["quiet"] = True
+            i += 1
+        elif a == "--run-once":
+            args["run_once"] = True
+            i += 1
+        elif a == "--export":
+            args["export"] = True
+            i += 1
+        elif a == "--export-customer" and i + 1 < len(argv):
+            args["export_customer"] = argv[i + 1]
+            i += 2
+        elif a == "--help":
+            args["help"] = True
+            i += 1
+        else:
+            i += 1
+    return args
 
 
-def _sleep(seconds: float, stop_event: Optional[threading.Event] = None) -> bool:
-    remaining = int(seconds)
-    while remaining > 0:
-        if stop_event is not None and stop_event.is_set():
-            return True
-        chunk = min(remaining, 1)
-        time.sleep(chunk)
-        remaining -= chunk
-    return False
+def _print_help() -> None:
+    print("InstacallMonitor - Balance & Margin Monitor")
+    print()
+    print("Usage: python monitor.py [OPTIONS]")
+    print()
+    print("Options:")
+    print("  --interval N         Check interval in seconds (overrides settings.toml)")
+    print("  --balance-below N    Override all balance thresholds")
+    print("  --margin-below N     Override margin threshold (%)")
+    print("  --billed-above N    Override billed minutes threshold")
+    print("  --cooldown N         Alert cooldown in seconds")
+    print("  --quiet              Suppress non-alert output")
+    print("  --run-once           Run one check cycle and exit")
+    print("  --export             Export balance + margin CSV and exit")
+    print("  --export-customer ID Export for specific customer only")
+    print("  --help               Show this help")
+    print()
+    print("Settings in settings.toml  |  Credentials in .env")
 
 
-def _qprint(settings: Settings, *args, **kwargs) -> None:
-    if not settings.global_.quiet:
-        print(*args, **kwargs)
+def _apply_cli_overrides(settings: Settings, args: dict[str, object]) -> Settings:
+    g = settings.global_
+    if "interval" in args:
+        g.check_interval = int(args["interval"])
+    if "margin_below" in args:
+        g.margin_below = float(args["margin_below"])
+    if "billed_above" in args:
+        g.billed_above = float(args["billed_above"])
+    if "cooldown" in args:
+        g.cooldown = int(args["cooldown"])
+    if "balance_below" in args:
+        val = float(args["balance_below"])
+        for w in settings.watch:
+            w.balance_below = val
+    if args.get("quiet"):
+        g._quiet = True
+    return settings
 
 
-def _monitor_loop(settings: Settings, session: requests.Session,
-                  stop_event: Optional[threading.Event] = None) -> None:
+def _qprint(settings: Settings, *a, **kw) -> None:
+    if not getattr(settings.global_, "_quiet", False):
+        print(*a, **kw)
+
+
+def _sleep(seconds: int) -> None:
+    for _ in range(seconds):
+        time.sleep(1)
+
+
+def _print_banner(settings: Settings) -> None:
+    g = settings.global_
+    cids = settings.customer_ids
+    audio_str = green("ON") if g.audio else dim("OFF")
+    print()
+    print(f"  {bold('InstacallMonitor')}  {dim(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))}")
+    print(f"  {dim('─' * 50)}")
+    print(f"  {bold(str(len(cids)))} customers monitored  |  Every {bold(str(g.check_interval))}s")
+    print(f"  Margin below {yellow(f'{g.margin_below:.0f}%')}  |  Billed above {yellow(f'{g.billed_above:.0f} min')}")
+    for w in settings.watch:
+        bal = w.resolve_balance_below()
+        print(f"    {w.customer}:  balance below {red(f'{bal:+.1f}')}")
+    print(f"  Audio  {audio_str}  |  Cooldown {g.cooldown}s  |  DB retention {g.db_retention_days}d")
+    print(f"  {dim('Ctrl+C to stop.')}")
+    print()
+
+
+def _run_export(settings: Settings, args: dict[str, object]) -> None:
+    cid = str(args.get("export_customer", "")) or None
+    b_file = export_balance_csv(customer_id=cid)
+    m_file = export_margin_csv(customer_id=cid)
+    print(f"  {green('Exported:')} {b_file}")
+    print(f"  {green('Exported:')} {m_file}")
+
+
+def _run_once(settings: Settings) -> None:
+    g = settings.global_
+    session = auth.create_session()
+    if not auth.perform_login(session, g.request_timeout):
+        print("  Login failed.")
+        session.close()
+        return
+    init_db()
+
+    print()
+    print(f"  {bold('Quick Check')}  {dim(datetime.now().strftime('%H:%M:%S'))}")
+    print(f"  {dim('─' * 50)}")
+
+    for cid in settings.customer_ids:
+        name, balance, credit_limit, error = fetch_balance(session, cid, g.request_timeout)
+        ts = datetime.now().strftime("%H:%M:%S")
+        print_balance_line(name or "N/A", cid, balance, credit_limit, error, ts=ts)
+        if balance is not None:
+            remaining = credit_limit + balance if credit_limit is not None else None
+            insert_balance(BalanceRecord(
+                customer_id=cid, customer_name=name or "N/A",
+                balance=balance, credit_limit=credit_limit, remaining=remaining,
+            ))
+        time.sleep(0.3)
+
+    print()
+    print(f"  {bold('Summary')}")
+    print(f"  {dim('─' * 50)}")
+    summary, err = fetch_summary_report(session, settings)
+    if summary:
+        for cid, data in summary.items():
+            ts = datetime.now().strftime("%H:%M:%S")
+            print_summary_line(data, cid, monitored=(cid in settings.customer_ids), ts=ts)
+            m = data.get("margin")
+            b = data.get("billed_min")
+            insert_margin(MarginRecord(
+                customer_id=cid, customer_name=str(data.get("name", "N/A")),
+                margin=float(m) if isinstance(m, (int, float)) else None,
+                billed_min=float(b) if isinstance(b, (int, float)) else None,
+            ))
+    else:
+        print(f"  {dim('No data' + (f' — {err}' if err else ''))}")
+
+    session.close()
+    print()
+
+
+def _monitor_loop(settings: Settings) -> None:
     g = settings.global_
     customer_ids = settings.customer_ids
     interval = g.check_interval
     timeout = g.request_timeout
-    cooldown = g.cooldown
 
-    last_balance_vals: dict[str, tuple[float, Optional[float]]] = {}
-    last_margin_vals: dict[str, tuple[Optional[float], Optional[float]]] = {}
-    error_count = 0
-    last_error: Optional[str] = None
-
-    init_db()
-    purge_old_records(g.db_retention_days)
-
-    write_status(alive=True, error_count=0)
-    _qprint(settings, "  Running first check now...")
-
-    try:
-        first_cycle = True
-        while True:
-            last_check = time.strftime("%Y-%m-%d %H:%M:%S")
-
-            if not is_within_active_hours(g.active_hours_start, g.active_hours_end, g.active_days):
-                write_status(alive=True, last_check=last_check, error_count=error_count, last_error=last_error)
-                next_time = time.strftime("%H:%M:%S", time.localtime(time.time() + interval))
-                _qprint(settings, f"  [{time.strftime('%H:%M:%S')}] Outside active hours. Next wake at {next_time}")
-                if _sleep(interval, stop_event):
-                    break
-                continue
-
-            if first_cycle and len(customer_ids) > 1:
-                error_count += _fetch_balances_parallel(settings, session, customer_ids, timeout,
-                                       last_balance_vals, cooldown)
-            else:
-                for cid in customer_ids:
-                    if _process_balance(settings, session, cid, timeout, cooldown,
-                                     last_balance_vals):
-                        error_count += 1
-                    if _sleep(0.1, stop_event):
-                        break
-            first_cycle = False
-
-            _qprint(settings)
-            summary, summary_error = fetch_summary_report(session, settings)
-            if not summary:
-                error_count += 1
-                last_error = summary_error or "summary report fetch returned empty"
-
-            if error_count > 0:
-                last_error = f"{error_count} fetch errors in last cycle"
-            shown = 0
-            total = len(summary)
-            show_ids: set[str]
-            if g.summary_show_all:
-                show_ids = set(summary.keys())
-            else:
-                show_ids = set(customer_ids) | {
-                    cid for cid, data in summary.items()
-                    if (data.get('margin') is not None and data.get('billed_min') is not None
-                        and data.get('margin') < g.margin_below
-                        and data.get('billed_min') > g.billed_above)
-                }
-
-            _qprint(settings, f"  -- Summary ({len(show_ids)} shown / {total} total) --")
-            for cid, data in summary.items():
-                if cid not in show_ids:
-                    continue
-
-                margin = data.get('margin')
-                billed_min = data.get('billed_min')
-                name = str(data.get('name', 'N/A'))
-                monitored = cid in customer_ids
-
-                if (margin is not None and margin == 0 and billed_min is not None and billed_min == 0
-                        and not monitored):
-                    continue
-
-                print_summary_line(data, cid, monitored=monitored,
-                                   prefix=f"[M] [{time.strftime('%H:%M:%S')}]")
-                shown += 1
-
-                cust = settings.get_watch(cid)
-                margin_blw = cust.resolve_margin_below(g.margin_below)
-                margin_rearm = cust.resolve_margin_critical(g.margin_critical)
-                billed_abv = cust.resolve_billed_above(g.billed_above)
-                margin_escalation = margin_rearm < margin_blw
-
-                if margin is not None:
-                    logging.info(f"Customer {cid} ({name}) - Margin: {margin:.1f}% | Billed Min: {billed_min:.1f}")
-
-                m_prev = last_margin_vals.get(cid)
-                m_curr = (float(margin) if isinstance(margin, (int, float)) else None,
-                           float(billed_min) if isinstance(billed_min, (int, float)) else None)
-                if m_prev != m_curr:
-                    last_margin_vals[cid] = m_curr
-                    insert_margin(MarginRecord(
-                        customer_id=cid, customer_name=name,
-                        margin=float(margin) if isinstance(margin, (int, float)) else None,
-                        billed_min=float(billed_min) if isinstance(billed_min, (int, float)) else None,
-                    ))
-
-                if margin is not None and billed_min is not None and monitored:
-                    state = _alert_state.get_margin_state(cid)
-                    if margin < margin_blw and billed_min > billed_abv:
-                        if state == 0 and _siren_manager.can_margin_alert(cid, cooldown):
-                            trigger_margin_alert(cid, margin, billed_min, name, settings)
-                            _alert_state.set_margin_state(cid, 1)
-                            print(f"  !! MARGIN ALERT for {name} (ID: {cid}) - state S1")
-                        elif state == 1 and margin_escalation and margin < margin_rearm and _siren_manager.can_margin_alert(cid, cooldown):
-                            trigger_margin_alert(cid, margin, billed_min, name, settings, escalated=True)
-                            _alert_state.set_margin_state(cid, 2)
-                            print(f"  !!! MARGIN ESCALATION for {name} (ID: {cid}) - state S2")
-                    elif state > 0 and (margin >= margin_blw or billed_min <= billed_abv):
-                        trigger_recovery_alert(cid, margin, name, settings, "margin")
-                        logging.info(f"Customer {cid} ({name}) - Margin recovered to {margin:.1f}%. Alert disarmed.")
-                        _alert_state.set_margin_state(cid, 0)
-
-            write_status(alive=True, last_check=last_check, error_count=error_count, last_error=last_error)
-            purge_old_records(g.db_retention_days)
-            next_time = time.strftime("%H:%M:%S", time.localtime(time.time() + interval))
-            _qprint(settings)
-            _qprint(settings, f"  [{time.strftime('%H:%M:%S')}] Cycle complete. Next check at {next_time} (~{interval}s)")
-            _qprint(settings, f"  {'-' * 40}")
-            if _sleep(interval, stop_event):
-                break
-
-    except KeyboardInterrupt:
-        print("\n\n[-] Interrupted. Shutting down...")
-        logging.info("Monitor stopped by user (Ctrl+C).")
-    finally:
-        write_status(alive=False)
-
-
-def _process_balance(settings: Settings, session: requests.Session,
-                     cid: str, timeout: int, cooldown: int,
-                     last_balance_vals: dict) -> bool:
-    cust = settings.get_watch(cid)
-    bal_below = cust.resolve_balance_below()
-    bal_rearm = cust.resolve_balance_critical()
-    balance_escalation = bal_rearm < bal_below
-
-    customer_name, balance, credit_limit, fetch_error = fetch_balance(session, cid, timeout)
-
-    if balance is not None:
-        remaining = credit_limit + balance if credit_limit is not None else None
-        print_balance_line(customer_name, cid, balance, credit_limit, fetch_error,
-                           prefix=f"B [{time.strftime('%H:%M:%S')}]")
-
-        prev = last_balance_vals.get(cid)
-        curr = (balance, credit_limit)
-        if prev != curr:
-            last_balance_vals[cid] = curr
-            insert_balance(BalanceRecord(
-                customer_id=cid, customer_name=customer_name or "N/A",
-                balance=balance, credit_limit=credit_limit, remaining=remaining,
-            ))
-
-        if credit_limit is not None:
-            logging.info(f"Customer {cid} ({customer_name}) - Balance: {balance:.4f} | "
-                         f"Credit: {credit_limit:.2f} | Remaining: {remaining:.2f}")
-        else:
-            logging.info(f"Customer {cid} ({customer_name}) - Balance: {balance:.4f}")
-
-        state = _alert_state.get_balance_state(cid)
-        if balance < bal_below:
-            if state == 0 and _siren_manager.can_alert(cid, cooldown):
-                trigger_balance_alert(cid, balance, customer_name or "N/A", settings)
-                _alert_state.set_balance_state(cid, 1)
-                print(f"  !! BALANCE ALERT for {customer_name} (ID: {cid}) - state S1")
-            elif state == 1 and balance_escalation and balance < bal_rearm and _siren_manager.can_alert(cid, cooldown):
-                trigger_balance_alert(cid, balance, customer_name or "N/A", settings, escalated=True)
-                _alert_state.set_balance_state(cid, 2)
-                print(f"  !!! BALANCE ESCALATION for {customer_name} (ID: {cid}) - state S2")
-        elif state > 0 and balance >= bal_below:
-            trigger_recovery_alert(cid, balance, customer_name or "N/A", settings, "balance")
-            logging.info(f"Customer {cid} ({customer_name}) - Balance recovered to {balance:.4f}. Alert disarmed.")
-            _alert_state.set_balance_state(cid, 0)
-        return False
-    else:
-        logging.warning(f"Customer {cid} - fetch error: {fetch_error}")
-        print_balance_line("N/A", cid, None, None, fetch_error,
-                           prefix=f"B [{time.strftime('%H:%M:%S')}]")
-        return True
-
-def _fetch_balances_parallel(settings: Settings, session: requests.Session,
-                             customer_ids: list[str], timeout: int,
-                             last_balance_vals: dict, cooldown: int) -> int:
-    errors = 0
-    with ThreadPoolExecutor(max_workers=min(8, len(customer_ids))) as executor:
-        futures = {
-            executor.submit(fetch_balance, session, cid, timeout): cid
-            for cid in customer_ids
-        }
-        for future in as_completed(futures):
-            cid = futures[future]
-            try:
-                customer_name, balance, credit_limit, fetch_error = future.result()
-            except Exception as e:
-                customer_name, balance, credit_limit, fetch_error = None, None, None, str(e)
-                errors += 1
-
-            cust = settings.get_watch(cid)
-            bal_below = cust.resolve_balance_below()
-            bal_rearm = cust.resolve_balance_critical()
-            balance_escalation = bal_rearm < bal_below
-
-            if balance is not None:
-                remaining = credit_limit + balance if credit_limit is not None else None
-                print_balance_line(customer_name, cid, balance, credit_limit, fetch_error,
-                                   prefix=f"B [{time.strftime('%H:%M:%S')}]")
-
-                prev = last_balance_vals.get(cid)
-                curr = (balance, credit_limit)
-                if prev != curr:
-                    last_balance_vals[cid] = curr
-                    insert_balance(BalanceRecord(
-                        customer_id=cid, customer_name=customer_name or "N/A",
-                        balance=balance, credit_limit=credit_limit, remaining=remaining,
-                    ))
-
-                if credit_limit is not None:
-                    logging.info(f"Customer {cid} ({customer_name}) - Balance: {balance:.4f} | "
-                                 f"Credit: {credit_limit:.2f} | Remaining: {remaining:.2f}")
-                else:
-                    logging.info(f"Customer {cid} ({customer_name}) - Balance: {balance:.4f}")
-
-                state = _alert_state.get_balance_state(cid)
-                if balance < bal_below:
-                    if state == 0 and _siren_manager.can_alert(cid, cooldown):
-                        trigger_balance_alert(cid, balance, customer_name or "N/A", settings)
-                        _alert_state.set_balance_state(cid, 1)
-                        print(f"  !! BALANCE ALERT for {customer_name} (ID: {cid}) - state S1")
-                    elif state == 1 and balance_escalation and balance < bal_rearm and _siren_manager.can_alert(cid, cooldown):
-                        trigger_balance_alert(cid, balance, customer_name or "N/A", settings, escalated=True)
-                        _alert_state.set_balance_state(cid, 2)
-                        print(f"  !!! BALANCE ESCALATION for {customer_name} (ID: {cid}) - state S2")
-                elif state > 0 and balance >= bal_below:
-                    trigger_recovery_alert(cid, balance, customer_name or "N/A", settings, "balance")
-                    logging.info(f"Customer {cid} ({customer_name}) - Balance recovered to {balance:.4f}. Alert disarmed.")
-                    _alert_state.set_balance_state(cid, 0)
-            else:
-                errors += 1
-                logging.warning(f"Customer {cid} - fetch error: {fetch_error}")
-                print_balance_line("N/A", cid, None, None, fetch_error,
-                                   prefix=f"B [{time.strftime('%H:%M:%S')}]")
-    return errors
-
-
-def run_monitor(settings: Settings, stop_event: Optional[threading.Event] = None) -> None:
-    g = settings.global_
-    customer_ids = settings.customer_ids
-    interval = g.check_interval
-
-    write_status(alive=True, last_check=time.strftime("%Y-%m-%d %H:%M:%S"))
-
-    audio_str = green("ON") if g.audio else dim("OFF")
-    webhook_str = cyan(g.webhook_type) if g.webhook_type != "none" else dim("none")
-    quiet_str = dim("ON") if g.quiet else dim("OFF")
-    active_str = "24/7"
-    if g.active_hours_start and g.active_hours_end:
-        days = f" ({g.active_days})" if g.active_days else " (all days)"
-        active_str = f"{g.active_hours_start}-{g.active_hours_end}{days}"
-
-    print()
-    print(f"  {bold('Monitor Started')}  {dim(time.strftime('%Y-%m-%d %H:%M:%S'))}")
-    print(f"  {dim('-' * 50)}")
-    print(f"  Watching    {bold(str(len(customer_ids)))} customers  |  Every {bold(str(interval))}s")
-    print(f"  Margin      below {yellow(fmt_pct(g.margin_below))}  |  Billed above {yellow(str(int(g.billed_above)))} min")
-    for w in settings.watch:
-        bal = w.balance_below
-        bal_str = red(f"{bal:+.1f}") if bal is not None else dim("N/A")
-        extra = f", critical {w.balance_critical:+.1f}" if w.balance_critical is not None and w.balance_critical != w.balance_below else ""
-        print(f"    {w.customer}:  balance below {bal_str}{extra}")
-    print(f"  Audio       {audio_str}  |  Webhooks  {webhook_str}  |  Active  {active_str}")
-    print(f"  {dim('-' * 50)}")
-
-    if g.health_port > 0:
-        start_health_server(g.health_port)
-        print(f"  {dim('Health')}     http://localhost:{g.health_port}/health")
-    print(f"  {dim('Ctrl+C to stop.')}")
-    if g.quiet:
-        print(f"  {dim('Quiet mode ON — only alerts shown.')}")
-    print()
-
-    session = create_session()
-    if not perform_login(session, g.request_timeout):
+    session = auth.create_session()
+    if not auth.perform_login(session, g.request_timeout):
         print("  Login failed. Exiting.")
-        write_status(alive=False, last_error="Initial login failed")
         session.close()
         return
 
-    while True:
-        if stop_event is not None and stop_event.is_set():
-            break
-        try:
-            _monitor_loop(settings, session, stop_event)
-            break
-        except KeyboardInterrupt:
-            break
-        except Exception as e:
-            logging.critical(f"Monitor crashed: {e}\n{traceback.format_exc()}")
-            print(f"  CRASH: {e}")
-            print("  Restarting in 10 seconds...")
-            write_status(alive=False, last_error=str(e))
-            try:
-                session.close()
-            except Exception:
-                pass
-            session = create_session()
-            if not perform_login(session, g.request_timeout):
-                logging.critical("Re-login failed after crash. Stopping monitor.")
-                write_status(alive=False, last_error=str(e))
-                break
-            logging.info("Re-login successful after crash. Restarting monitor loop.")
-            if _sleep(10, stop_event):
-                break
+    init_db()
+    mgr = SirenManager()
+
+    last_balance: dict[str, tuple[float, Optional[float]]] = {}
+    last_margin: dict[str, tuple[Optional[float], Optional[float]]] = {}
+
+    _print_banner(settings)
+
+    try:
+        while True:
+            now_ts = datetime.now().strftime("%H:%M:%S")
+            _qprint(settings, f"  [{now_ts}] Checking balances ({len(customer_ids)} customers)...")
+
+            for cid in customer_ids:
+                name, balance, credit_limit, error = fetch_balance(session, cid, timeout)
+                ts = datetime.now().strftime("%H:%M:%S")
+                print_balance_line(name or "N/A", cid, balance, credit_limit, error, ts=ts)
+
+                if balance is not None:
+                    prev = last_balance.get(cid)
+                    curr = (balance, credit_limit)
+                    if prev != curr:
+                        last_balance[cid] = curr
+                        remaining = credit_limit + balance if credit_limit is not None else None
+                        insert_balance(BalanceRecord(
+                            customer_id=cid, customer_name=name or "N/A",
+                            balance=balance, credit_limit=credit_limit, remaining=remaining,
+                        ))
+
+                    check_balance_alert(mgr, cid, balance, name or "N/A", settings)
+                _sleep(1)
+
+            _qprint(settings)
+
+            summary, summary_error = fetch_summary_report(session, settings)
+            if not summary:
+                _qprint(settings, f"  {dim('Summary: no data' + (f' — {summary_error}' if summary_error else ''))}")
+            else:
+                _qprint(settings, f"  Summary ({len(summary)} customers)")
+                _qprint(settings, f"  {dim('─' * 50)}")
+
+                for cid, data in summary.items():
+                    monitored = cid in customer_ids
+                    ts = datetime.now().strftime("%H:%M:%S")
+                    print_summary_line(data, cid, monitored=monitored, ts=ts)
+
+                    margin = data.get("margin")
+                    billed_min = data.get("billed_min")
+
+                    m_prev = last_margin.get(cid)
+                    m_curr = (
+                        float(margin) if isinstance(margin, (int, float)) else None,
+                        float(billed_min) if isinstance(billed_min, (int, float)) else None,
+                    )
+                    if m_prev != m_curr:
+                        last_margin[cid] = m_curr
+                        insert_margin(MarginRecord(
+                            customer_id=cid, customer_name=str(data.get("name", "N/A")),
+                            margin=float(margin) if isinstance(margin, (int, float)) else None,
+                            billed_min=float(billed_min) if isinstance(billed_min, (int, float)) else None,
+                        ))
+
+                    if isinstance(margin, (int, float)) and isinstance(billed_min, (int, float)):
+                        check_margin_alert(mgr, cid, float(margin), float(billed_min),
+                                          str(data.get("name", "N/A")), settings, monitored=monitored)
+
+            purge_old_records(g.db_retention_days)
+
+            next_time = datetime.now().strftime("%H:%M:%S")
+            _qprint(settings)
+            _qprint(settings, f"  {dim('─' * 50)}")
+            _qprint(settings, f"  [{next_time}] Cycle complete. Next in {interval}s")
+            _qprint(settings)
+            _sleep(interval)
+
+    except KeyboardInterrupt:
+        print(f"\n  {bold('Shutting down...')}")
+    finally:
+        session.close()
+
+
+def main() -> None:
+    setup_logging()
+    args = _parse_args()
+
+    if args.get("help"):
+        _print_help()
+        sys.exit(0)
+
+    settings = load_settings()
+    settings = _apply_cli_overrides(settings, args)
+
+    errors = validate_settings(settings)
+    if errors:
+        print("Invalid settings:")
+        for e in errors:
+            print(f"  - {e}")
+        sys.exit(1)
+
+    try:
+        get_credentials()
+    except ValueError as e:
+        print(f"Credential error: {e}")
+        sys.exit(1)
+
+    init_db()
+
+    if args.get("export"):
+        _run_export(settings, args)
+        sys.exit(0)
+
+    if args.get("run_once"):
+        _run_once(settings)
+        sys.exit(0)
+
+    _monitor_loop(settings)
+
+
+if __name__ == "__main__":
+    main()

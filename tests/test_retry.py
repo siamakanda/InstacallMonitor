@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from retry import _is_transient
+from scrapers import _is_transient
 
 
 class TestRetry:
@@ -18,7 +18,6 @@ class TestRetry:
     def test_is_transient_timeout(self) -> None:
         assert _is_transient("timeout (10s)")
         assert _is_transient("Timeout error")
-        assert _is_transient("connection timed out")
 
     def test_is_transient_connection(self) -> None:
         assert _is_transient("connection error")

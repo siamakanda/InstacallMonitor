@@ -93,3 +93,33 @@ class TestPersistence:
         insert_balance(BalanceRecord(customer_id="1", customer_name="TestCo", balance=0.0, credit_limit=0.0, remaining=0.0))
         deleted = purge_old_records(0)
         assert deleted == 0
+
+    def test_alert_state(self, temp_db: str) -> None:
+        from persistence import get_alert_state, set_alert_state
+
+        state, count = get_alert_state("18", "balance")
+        assert state == 0
+        assert count == 0
+
+        set_alert_state("18", "balance", 1, count=1)
+        state, count = get_alert_state("18", "balance")
+        assert state == 1
+        assert count == 1
+
+        set_alert_state("18", "balance", 0, count=0)
+        state, count = get_alert_state("18", "balance")
+        assert state == 0
+        assert count == 0
+
+    def test_csv_export(self, temp_db: str) -> None:
+        from persistence import export_balance_csv, export_margin_csv
+
+        insert_balance(BalanceRecord(customer_id="1", customer_name="TestCo", balance=-100.0, credit_limit=500.0, remaining=400.0))
+        insert_margin(MarginRecord(customer_id="1", customer_name="TestCo", margin=45.0, billed_min=100.0))
+
+        bf = export_balance_csv(hours=24)
+        mf = export_margin_csv(hours=24)
+        assert os.path.exists(bf)
+        assert os.path.exists(mf)
+        os.unlink(bf)
+        os.unlink(mf)

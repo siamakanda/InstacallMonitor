@@ -11,24 +11,24 @@ from alerts import SirenManager
 class TestSirenManager:
     def test_cooldown_allows_first(self) -> None:
         mgr = SirenManager()
-        assert mgr.can_alert("18", 300)
+        assert mgr.can_alert("18", "balance", 300)
 
     def test_cooldown_blocks_within_window(self) -> None:
         mgr = SirenManager()
-        assert mgr.can_alert("18", 300)
-        assert not mgr.can_alert("18", 300)
+        assert mgr.can_alert("18", "balance", 300)
+        assert not mgr.can_alert("18", "balance", 300)
 
     def test_different_customers_independent(self) -> None:
         mgr = SirenManager()
-        assert mgr.can_alert("18", 300)
-        assert mgr.can_alert("99", 300)
+        assert mgr.can_alert("18", "balance", 300)
+        assert mgr.can_alert("99", "balance", 300)
 
-    def test_margin_cooldown_separate(self) -> None:
+    def test_different_types_independent(self) -> None:
         mgr = SirenManager()
-        assert mgr.can_alert("18", 300)
-        assert mgr.can_margin_alert("18", 300)
+        assert mgr.can_alert("18", "balance", 300)
+        assert mgr.can_alert("18", "margin", 300)
 
     def test_zero_cooldown_allows_repeat(self) -> None:
         mgr = SirenManager()
-        assert mgr.can_alert("18", 0)
-        assert mgr.can_alert("18", 0)
+        assert mgr.can_alert("18", "balance", 0)
+        assert mgr.can_alert("18", "balance", 0)

@@ -46,9 +46,9 @@ echo ============================================================
 echo [+] Setup complete. Launching InstacallMonitor...
 echo ============================================================
 echo.
-echo   Dashboard controls:
-echo     Q - Quit    S - Toggle monitor    R - Refresh
+echo   Controls:
+echo     Ctrl+C to stop  |  --help for options
 echo.
-venv\Scripts\python.exe menu.py
+venv\Scripts\python.exe monitor.py
 
 pause

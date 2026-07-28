@@ -2,5 +2,4 @@ beautifulsoup4==4.12.3
 python-dotenv==1.0.1
 requests==2.32.3
 plyer==2.1.0
-aiohttp==3.12.14
 tomli>=2.0

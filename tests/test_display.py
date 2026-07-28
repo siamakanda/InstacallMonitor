@@ -5,18 +5,18 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from display import fmt_billed_min, fmt_margin
+from display import dim, green, red, yellow
 
 
 class TestDisplay:
-    def test_fmt_margin_with_value(self) -> None:
-        assert fmt_margin(45.67) == "45.7%"
+    def test_red(self) -> None:
+        assert "\033[31m" in red("test")
 
-    def test_fmt_margin_none(self) -> None:
-        assert fmt_margin(None) == "-"
+    def test_green(self) -> None:
+        assert "\033[32m" in green("test")
 
-    def test_fmt_billed_min_with_value(self) -> None:
-        assert fmt_billed_min(1234.5) == "1234.5"
+    def test_yellow(self) -> None:
+        assert "\033[33m" in yellow("test")
 
-    def test_fmt_billed_min_none(self) -> None:
-        assert fmt_billed_min(None) == "-"
+    def test_dim(self) -> None:
+        assert "\033[2m" in dim("test")

@@ -2,20 +2,23 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 import traceback
-from dataclasses import dataclass, field
 from datetime import date
 from typing import Optional
 
 import requests
 from bs4 import BeautifulSoup, Tag
 
-from auth import ensure_authenticated
+from auth import perform_login
 from config import BASE_EDIT_URL, SUMMARY_REPORT_URL, Settings
-from retry import retry_with_backoff
+
+
+def _needs_relogin(response: requests.Response) -> bool:
+    return "login" in response.url.lower()
 
 BalanceResult = tuple[Optional[str], Optional[float], Optional[float], Optional[str]]
-SummaryResult = tuple[dict[str, dict[str, object]], Optional[str]]
+SummaryDict = dict[str, dict[str, object]]
 
 SUMMARY_COLUMN_MAP: dict[int, str] = {
     2: "calls",
@@ -27,77 +30,48 @@ SUMMARY_COLUMN_MAP: dict[int, str] = {
     12: "margin",
 }
 
-
-@dataclass
-class SummaryRow:
-    customer_id: str
-    customer_name: str
-    calls: Optional[float] = None
-    connected: Optional[float] = None
-    asr: Optional[float] = None
-    aloc: Optional[float] = None
-    billed_min: Optional[float] = None
-    profit: Optional[float] = None
-    margin: Optional[float] = None
-    balance: Optional[float] = None
-    raw_cells: dict[int, str] = field(default_factory=dict)
-
-    @classmethod
-    def from_summary_dict(cls, customer_id: str, data: dict[str, object]) -> SummaryRow:
-        return cls(
-            customer_id=customer_id,
-            customer_name=str(data.get("name", "")),
-            calls=_as_float(data.get("calls")),
-            connected=_as_float(data.get("connected")),
-            asr=_as_float(data.get("asr")),
-            aloc=_as_float(data.get("aloc")),
-            billed_min=_as_float(data.get("billed_min")),
-            profit=_as_float(data.get("profit")),
-            margin=_as_float(data.get("margin")),
-        )
+_RETRY_DELAYS = [2, 5]
 
 
-def _as_float(val: object) -> Optional[float]:
-    if val is None:
-        return None
-    try:
-        return float(val)
-    except (ValueError, TypeError):
-        return None
+def _is_transient(error: str | None) -> bool:
+    if not error:
+        return False
+    e = str(error).lower()
+    return "timeout" in e or "connection" in e
 
 
 def parse_customer_page(html: str) -> BalanceResult:
-    soup = BeautifulSoup(html, 'html.parser')
+    soup = BeautifulSoup(html, "html.parser")
 
     name_input = (
-        soup.find('input', {'name': 'name'})
-        or soup.find('input', {'id': 'name'})
-        or soup.find('input', {'name': 'customer_name'})
-        or soup.find('input', {'name': 'company'})
-        or soup.find('input', {'id': 'customer_name'})
+        soup.find("input", {"name": "name"})
+        or soup.find("input", {"id": "name"})
+        or soup.find("input", {"name": "customer_name"})
+        or soup.find("input", {"name": "company"})
+        or soup.find("input", {"id": "customer_name"})
     )
-    customer_name = name_input.get('value', 'N/A').strip() if name_input else 'N/A'
+    customer_name = name_input.get("value", "N/A").strip() if name_input else "N/A"
 
-    balance_input = soup.find('input', {'name': 'balance'}) or soup.find('input', {'id': 'balance'})
+    balance_input = soup.find("input", {"name": "balance"}) or soup.find("input", {"id": "balance"})
     balance: Optional[float] = None
-    if balance_input and balance_input.get('value'):
+    if balance_input and balance_input.get("value"):
         try:
-            balance = float(balance_input['value'])
+            balance = float(balance_input["value"])
         except ValueError:
             return None, None, None, f"non-numeric balance: '{balance_input['value']}'"
     else:
         return None, None, None, "balance field not found"
 
     credit_input = (
-        soup.find('input', {'name': 'credit_limit'})
-        or soup.find('input', {'id': 'credit_limit'})
-        or soup.find('input', {'name': 'credit'})
-        or soup.find('input', {'id': 'credit'})
+        soup.find("input", {"name": "credit_limit"})
+        or soup.find("input", {"id": "credit_limit"})
+        or soup.find("input", {"name": "credit"})
+        or soup.find("input", {"id": "credit"})
     )
     credit_limit: Optional[float] = None
-    if credit_input and credit_input.get('value'):
+    if credit_input and credit_input.get("value"):
         try:
-            credit_limit = float(credit_input['value'])
+            credit_limit = float(credit_input["value"])
         except ValueError:
             credit_limit = None
 
@@ -105,7 +79,7 @@ def parse_customer_page(html: str) -> BalanceResult:
 
 
 def _extract_cell_value(cell: Tag) -> Optional[float]:
-    num_span = cell.find('span', class_='rpt-num')
+    num_span = cell.find("span", class_="rpt-num")
     if num_span:
         text = num_span.get_text(strip=True)
         text = text.replace(",", "").replace("$", "").replace("s", "")
@@ -114,7 +88,7 @@ def _extract_cell_value(cell: Tag) -> Optional[float]:
         except ValueError:
             return None
 
-    pill_span = cell.find('span', class_='rpt-asr-pill')
+    pill_span = cell.find("span", class_="rpt-asr-pill")
     if pill_span:
         text = pill_span.get_text(strip=True).replace("%", "")
         try:
@@ -132,13 +106,13 @@ def _extract_cell_value(cell: Tag) -> Optional[float]:
 
 
 def _detect_column_map_from_thead(cust_panel: Tag) -> dict[int, str]:
-    thead = cust_panel.find('thead')
+    thead = cust_panel.find("thead")
     if not thead:
         return {}
-    header_row = thead.find('tr')
+    header_row = thead.find("tr")
     if not header_row:
         return {}
-    header_cells = header_row.find_all('th')
+    header_cells = header_row.find_all("th")
     if len(header_cells) < 4:
         return {}
 
@@ -162,50 +136,50 @@ def _detect_column_map_from_thead(cust_panel: Tag) -> dict[int, str]:
     return col_map
 
 
-def parse_summary_page(html: str) -> Optional[dict[str, dict[str, object]]]:
-    soup = BeautifulSoup(html, 'html.parser')
-    cust_panel = soup.find('div', id='panel-cust')
+def parse_summary_page(html: str) -> Optional[SummaryDict]:
+    soup = BeautifulSoup(html, "html.parser")
+    cust_panel = soup.find("div", id="panel-cust")
     if not cust_panel:
         return None
-    tbody = cust_panel.find('tbody')
+    tbody = cust_panel.find("tbody")
     if not tbody:
         return None
 
     col_map = _detect_column_map_from_thead(cust_panel)
     effective_map = col_map if col_map else dict(SUMMARY_COLUMN_MAP)
 
-    results: dict[str, dict[str, object]] = {}
-    for row in tbody.find_all('tr', recursive=False):
-        classes = row.get('class', [])
-        if 'sr-trunk-row' in classes:
+    results: SummaryDict = {}
+    for row in tbody.find_all("tr", recursive=False):
+        classes = row.get("class", [])
+        if "sr-trunk-row" in classes:
             continue
-        cells = row.find_all('td')
+        cells = row.find_all("td")
         if len(cells) < 13:
             continue
-        vol_name = cells[1].find('span', class_='sr-vol-name')
-        customer_name = vol_name.get_text(strip=True) if vol_name else 'N/A'
+        vol_name = cells[1].find("span", class_="sr-vol-name")
+        customer_name = vol_name.get_text(strip=True) if vol_name else "N/A"
 
         billed_min: Optional[float] = None
-        billed_span = cells[7].find('span', class_='rpt-num')
+        billed_span = cells[7].find("span", class_="rpt-num")
         if billed_span:
             try:
-                billed_min = float(billed_span.get_text(strip=True).replace(',', ''))
+                billed_min = float(billed_span.get_text(strip=True).replace(",", ""))
             except ValueError:
                 pass
 
         margin: Optional[float] = None
-        margin_span = cells[12].find('span', class_='rpt-asr-pill')
+        margin_span = cells[12].find("span", class_="rpt-asr-pill")
         if margin_span:
-            text = margin_span.get_text(strip=True).replace('%', '')
+            text = margin_span.get_text(strip=True).replace("%", "")
             try:
                 margin = float(text)
             except ValueError:
                 pass
 
         row_data: dict[str, object] = {
-            'name': customer_name,
-            'margin': margin,
-            'billed_min': billed_min,
+            "name": customer_name,
+            "margin": margin,
+            "billed_min": billed_min,
         }
 
         for cell_idx, field_name in effective_map.items():
@@ -216,70 +190,52 @@ def parse_summary_page(html: str) -> Optional[dict[str, dict[str, object]]]:
                 if val is not None:
                     row_data[field_name] = val
 
-        expand_btn = cells[0].find('button', class_='sr-expand-btn')
-        cust_id_from_html: Optional[str] = None
-        if expand_btn and expand_btn.get('onclick'):
-            match = re.search(r"ct(\d+)", expand_btn.get('onclick', ''))
+        expand_btn = cells[0].find("button", class_="sr-expand-btn")
+        if expand_btn and expand_btn.get("onclick"):
+            match = re.search(r"ct(\d+)", expand_btn.get("onclick", ""))
             if match:
-                cust_id_from_html = match.group(1)
-
-        if cust_id_from_html:
-            results[cust_id_from_html] = row_data
+                results[match.group(1)] = row_data
 
     return results
 
 
-def _extract_balance_error(result: BalanceResult) -> Optional[str]:
-    return result[3] if result and len(result) == 4 else None
-
-
-def _extract_summary_error(result: SummaryResult) -> Optional[str]:
-    return result[1] if result and len(result) == 2 else None
-
-
 def fetch_balance(session: requests.Session, customer_id: str, timeout: int = 10) -> BalanceResult:
-    return retry_with_backoff(_do_fetch_balance, _extract_balance_error, session, customer_id, timeout)
-
-
-def _do_fetch_balance(session: requests.Session, customer_id: str, timeout: int = 10) -> BalanceResult:
     edit_url = f"{BASE_EDIT_URL}{customer_id}"
-    try:
-        resp = session.get(edit_url, timeout=timeout, allow_redirects=True)
-        if not ensure_authenticated(session, resp, timeout):
-            return None, None, None, "re-login failed"
-        if "login" in resp.url.lower():
-            try:
+    last_error: Optional[str] = None
+
+    for attempt in range(len(_RETRY_DELAYS) + 1):
+        try:
+            resp = session.get(edit_url, timeout=timeout, allow_redirects=True)
+            if _needs_relogin(resp):
+                logging.warning("Session expired. Re-logging in...")
+                if not perform_login(session, timeout):
+                    last_error = "re-login failed"
+                    if attempt < len(_RETRY_DELAYS):
+                        time.sleep(_RETRY_DELAYS[attempt])
+                        continue
+                    return None, None, None, last_error
                 resp = session.get(edit_url, timeout=timeout, allow_redirects=True)
-            except requests.exceptions.Timeout:
-                return None, None, None, f"timeout after re-login ({timeout}s)"
-            except requests.exceptions.ConnectionError:
-                return None, None, None, "connection error after re-login"
-            except Exception as e:
-                return None, None, None, str(e)
-            if not ensure_authenticated(session, resp, timeout):
-                return None, None, None, "re-login failed on second attempt"
-        if resp.status_code != 200:
-            return None, None, None, f"HTTP {resp.status_code}"
-        return parse_customer_page(resp.text)
-    except requests.exceptions.Timeout:
-        return None, None, None, f"timeout ({timeout}s)"
-    except requests.exceptions.ConnectionError:
-        return None, None, None, "connection error"
-    except Exception as e:
-        logging.error(f"Customer {customer_id} - Unexpected error: {e}\n{traceback.format_exc()}")
-        return None, None, None, str(e)
+            if resp.status_code != 200:
+                last_error = f"HTTP {resp.status_code}"
+                if attempt < len(_RETRY_DELAYS) and resp.status_code >= 500:
+                    time.sleep(_RETRY_DELAYS[attempt])
+                    continue
+                return None, None, None, last_error
+            return parse_customer_page(resp.text)
+        except requests.exceptions.Timeout:
+            last_error = f"timeout ({timeout}s)"
+        except requests.exceptions.ConnectionError:
+            last_error = "connection error"
+        except Exception as e:
+            logging.error(f"Customer {customer_id} - error: {e}\n{traceback.format_exc()}")
+            last_error = str(e)
+        if attempt < len(_RETRY_DELAYS) and _is_transient(last_error):
+            time.sleep(_RETRY_DELAYS[attempt])
+
+    return None, None, None, last_error
 
 
-def fetch_summary_report(session: requests.Session, settings: Settings) -> tuple[dict[str, dict[str, object]], Optional[str]]:
-    result = retry_with_backoff(_do_fetch_summary, _extract_summary_error, session, settings)
-    return result
-
-
-def summaries_to_rows(summary_dict: dict[str, dict[str, object]]) -> list[SummaryRow]:
-    return [SummaryRow.from_summary_dict(cid, data) for cid, data in summary_dict.items()]
-
-
-def _do_fetch_summary(session: requests.Session, settings: Settings) -> SummaryResult:
+def fetch_summary_report(session: requests.Session, settings: Settings) -> tuple[SummaryDict, Optional[str]]:
     g = settings.global_
     today = date.today().isoformat()
     timeout = g.request_timeout or 10
@@ -289,59 +245,55 @@ def _do_fetch_summary(session: requests.Session, settings: Settings) -> SummaryR
         "date_from": today,
         "date_to": today,
     }
-    error: Optional[str] = None
+    last_error: Optional[str] = None
 
-    try:
-        resp = session.get(SUMMARY_REPORT_URL, params=params, timeout=timeout, allow_redirects=True)
-    except requests.exceptions.Timeout:
-        error = f"timeout ({timeout}s)"
-        logging.error(f"Summary report - {error}")
-        return {}, error
-    except requests.exceptions.ConnectionError:
-        error = "connection error"
-        logging.error(f"Summary report - {error}")
-        return {}, error
-    except Exception as e:
-        error = str(e)
-        logging.error(f"Summary report - unexpected error: {e}\n{traceback.format_exc()}")
-        return {}, error
-
-    if not ensure_authenticated(session, resp, timeout):
-        error = "re-login failed"
-        return {}, error
-
-    if "login" in resp.url.lower():
+    for attempt in range(len(_RETRY_DELAYS) + 1):
         try:
             resp = session.get(SUMMARY_REPORT_URL, params=params, timeout=timeout, allow_redirects=True)
         except requests.exceptions.Timeout:
-            error = f"timeout after re-login ({timeout}s)"
-            return {}, error
+            last_error = f"timeout ({timeout}s)"
+            if attempt < len(_RETRY_DELAYS):
+                time.sleep(_RETRY_DELAYS[attempt])
+                continue
+            return {}, last_error
         except requests.exceptions.ConnectionError:
-            error = "connection error after re-login"
-            return {}, error
+            last_error = "connection error"
+            if attempt < len(_RETRY_DELAYS):
+                time.sleep(_RETRY_DELAYS[attempt])
+                continue
+            return {}, last_error
         except Exception as e:
-            error = f"unexpected error after re-login: {e}"
-            logging.error(f"Summary report - {error}")
-            return {}, error
-        if not ensure_authenticated(session, resp, timeout):
-            error = "re-login failed on second attempt"
-            return {}, error
+            logging.error(f"Summary - error: {e}\n{traceback.format_exc()}")
+            return {}, str(e)
 
-    if resp.status_code != 200:
-        error = f"HTTP {resp.status_code}"
-        logging.error(f"Summary report returned {error}")
-        return {}, error
+        if _needs_relogin(resp):
+            logging.warning("Session expired. Re-logging in...")
+            if not perform_login(session, timeout):
+                last_error = "re-login failed"
+                if attempt < len(_RETRY_DELAYS):
+                    time.sleep(_RETRY_DELAYS[attempt])
+                    continue
+                return {}, last_error
+            resp = session.get(SUMMARY_REPORT_URL, params=params, timeout=timeout, allow_redirects=True)
 
-    try:
-        results = parse_summary_page(resp.text)
-    except Exception as e:
-        error = f"parse error: {e}"
-        logging.error(f"Summary report - {error}\n{traceback.format_exc()}")
-        return {}, error
+        if resp.status_code != 200:
+            last_error = f"HTTP {resp.status_code}"
+            if attempt < len(_RETRY_DELAYS) and resp.status_code >= 500:
+                time.sleep(_RETRY_DELAYS[attempt])
+                continue
+            return {}, last_error
 
-    if results is None:
-        error = "failed to parse summary page"
-        return {}, error
+        try:
+            results = parse_summary_page(resp.text)
+        except Exception as e:
+            last_error = f"parse error: {e}"
+            logging.error(f"Summary parse error: {e}")
+            return {}, last_error
 
-    logging.info(f"Summary report parsed - {len(results)} customers found.")
-    return results, None
+        if results is None:
+            return {}, "failed to parse summary page"
+
+        logging.info(f"Summary - {len(results)} customers found.")
+        return results, None
+
+    return {}, last_error

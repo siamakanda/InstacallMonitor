@@ -4,11 +4,9 @@ import logging
 import sys
 import threading
 import time
-from typing import Optional
 
-from config import GlobalSettings, Settings
-from notifications import send_webhook
-from persistence import AlertEvent, get_alert_state, insert_alert_event, set_alert_state
+from config import Settings
+from persistence import get_alert_state, set_alert_state
 
 
 class SirenManager:
@@ -21,7 +19,7 @@ class SirenManager:
     def is_playing(self) -> bool:
         return self._playing
 
-    def _can_alert(self, customer_id: str, alert_type: str, cooldown: float) -> bool:
+    def can_alert(self, customer_id: str, alert_type: str, cooldown: float) -> bool:
         with self._lock:
             key = f"{customer_id}:{alert_type}"
             now = time.time()
@@ -30,25 +28,6 @@ class SirenManager:
                 return False
             self._timestamps[key] = now
             return True
-
-    def can_alert(self, customer_id: str, cooldown: float) -> bool:
-        return self._can_alert(customer_id, "balance", cooldown)
-
-    def can_margin_alert(self, customer_id: str, cooldown: float) -> bool:
-        return self._can_alert(customer_id, "margin", cooldown)
-
-    def play_rising_falling(self, global_: GlobalSettings) -> None:
-        for _ in range(global_.siren_loops):
-            for freq in range(global_.siren_min_freq, global_.siren_max_freq, global_.siren_step_freq):
-                _beep(freq, global_.siren_tone_duration)
-            for freq in range(global_.siren_max_freq, global_.siren_min_freq, -global_.siren_step_freq):
-                _beep(freq, global_.siren_tone_duration)
-
-    def play_alternating(self, global_: GlobalSettings) -> None:
-        tone = max(global_.siren_tone_duration, 100)
-        for _ in range(global_.siren_loops * 2):
-            _beep(global_.siren_min_freq, tone)
-            _beep(global_.siren_max_freq, tone)
 
     def _acquire(self) -> bool:
         with self._lock:
@@ -61,6 +40,22 @@ class SirenManager:
         with self._lock:
             self._playing = False
 
+    def play_rising_falling(self) -> None:
+        freq_min, freq_max, step, duration = 2200, 3500, 130, 50
+        loops = 10
+        for _ in range(loops):
+            for freq in range(freq_min, freq_max, step):
+                _beep(freq, duration)
+            for freq in range(freq_max, freq_min, -step):
+                _beep(freq, duration)
+
+    def play_alternating(self) -> None:
+        freq_min, freq_max = 2200, 3500
+        tone = 100
+        for _ in range(20):
+            _beep(freq_min, tone)
+            _beep(freq_max, tone)
+
 
 def _beep(freq: int, duration: int) -> None:
     if sys.platform == "win32":
@@ -68,107 +63,54 @@ def _beep(freq: int, duration: int) -> None:
         winsound.Beep(freq, duration)
 
 
-def play_siren(
-    manager: SirenManager,
-    play_fn,
-    customer_name: str,
-    customer_id: str,
-    alert_type: str,
-) -> None:
-    with manager._lock:
-        if manager._playing:
-            print(f"Siren skipped (already playing) - {alert_type} for {customer_name} (ID: {customer_id})")
+def _play_siren_async(mgr: SirenManager, play_fn, label: str) -> None:
+    with mgr._lock:
+        if mgr._playing:
+            print(f"  Siren skipped (already playing) - {label}")
             return
-        manager._playing = True
-    print(f"Siren for {customer_name} (ID: {customer_id}) - {alert_type}...")
-    def _play_and_release():
+        mgr._playing = True
+
+    print(f"  Siren: {label}")
+
+    def _run() -> None:
         try:
             play_fn()
         finally:
-            with manager._lock:
-                manager._playing = False
-    threading.Thread(target=_play_and_release, daemon=True).start()
+            mgr._release()
 
-
-class AlertStateManager:
-    def get_balance_state(self, customer_id: str) -> int:
-        return get_alert_state(customer_id, "balance").state
-
-    def get_margin_state(self, customer_id: str) -> int:
-        return get_alert_state(customer_id, "margin").state
-
-    def set_balance_state(self, customer_id: str, state: int) -> None:
-        set_alert_state(customer_id, "balance", state)
-
-    def set_margin_state(self, customer_id: str, state: int) -> None:
-        set_alert_state(customer_id, "margin", state)
-
-
-_siren_manager = SirenManager()
-_alert_state = AlertStateManager()
+    threading.Thread(target=_run, daemon=True).start()
 
 
 def _safe_notify(title: str, message: str, timeout: int = 10) -> None:
     try:
-        _safe_notify(title=title, message=message, app_name="InstacallMonitor", timeout=timeout)
+        from plyer import notification
+        notification.notify(title=title, message=message, app_name="InstacallMonitor", timeout=timeout)
     except Exception as e:
         logging.warning(f"Desktop notification failed: {e}")
 
 
-def _log_alert_event(customer_id: str, alert_type: str, severity: str,
-                     value: Optional[float], threshold: Optional[float],
-                     billed_min: Optional[float] = None) -> None:
-    try:
-        insert_alert_event(AlertEvent(
-            customer_id=customer_id,
-            alert_type=alert_type,
-            severity=severity,
-            value=value,
-            threshold=threshold,
-            billed_min=billed_min,
-        ))
-    except Exception as e:
-        logging.warning(f"Failed to log alert event: {e}")
-
-
 def trigger_balance_alert(
     customer_id: str,
-    current_balance: float,
+    balance: float,
     customer_name: str,
     settings: Settings,
-    escalated: bool = False,
+    mgr: SirenManager,
 ) -> None:
     g = settings.global_
     w = settings.get_watch(customer_id)
-    bal_below = w.resolve_balance_below()
-    bal_critical = w.resolve_balance_critical()
-    title = "BALANCE ESCALATION" if escalated else "BALANCE CRITICAL ALERT"
-    severity = "escalated" if escalated else "dropped"
-
-    _log_alert_event(customer_id, "balance", severity, current_balance,
-                     bal_critical if escalated else bal_below)
+    threshold = w.resolve_balance_below()
 
     _safe_notify(
-        title=title,
-        message=f"{customer_name} (ID: {customer_id}) balance {severity} to {current_balance:.4f}!",
+        title="BALANCE ALERT",
+        message=f"{customer_name} (ID: {customer_id}) balance dropped to {balance:.4f}!",
         timeout=10,
     )
-    thresh_info = f" (escalation < {bal_critical:+.1f})" if escalated else ""
     logging.warning(
-        f"ALERT TRIGGERED for {customer_name} (ID: {customer_id}): "
-        f"Balance {current_balance:.4f} < {bal_below}{thresh_info}"
+        f"ALERT for {customer_name} (ID: {customer_id}): Balance {balance:.4f} < {threshold:+.1f}"
     )
-    send_webhook(g, title,
-                 f"{customer_name} (ID: {customer_id}) balance {severity} to {current_balance:.4f}")
 
     if g.audio:
-        play_siren(
-            _siren_manager,
-            lambda: _siren_manager.play_rising_falling(g),
-            customer_name,
-            customer_id,
-            "BALANCE" if not escalated else "BALANCE ESCALATION",
-        )
+        _play_siren_async(mgr, mgr.play_rising_falling, f"BALANCE {customer_name} ({customer_id})")
 
 
 def trigger_margin_alert(
@@ -177,41 +119,22 @@ def trigger_margin_alert(
     billed_min: float,
     customer_name: str,
     settings: Settings,
-    escalated: bool = False,
+    mgr: SirenManager,
 ) -> None:
     g = settings.global_
-    title = "MARGIN ESCALATION" if escalated else "MARGIN CRITICAL ALERT"
-    severity = "escalated" if escalated else "dropped"
-
-    _log_alert_event(customer_id, "margin", severity, margin,
-                     g.margin_critical if escalated else g.margin_below,
-                     billed_min)
 
     _safe_notify(
-        title=title,
-        message=f"{customer_name} (ID: {customer_id}) Margin {severity} to "
-                f"{margin:.1f}%! (Billed: {billed_min:.1f} min)",
+        title="MARGIN ALERT",
+        message=f"{customer_name} (ID: {customer_id}) Margin dropped to {margin:.1f}%! (Billed: {billed_min:.1f} min)",
         timeout=10,
     )
-    rearm_thresh = g.margin_critical
-    thresh_info = f" (escalation < {rearm_thresh}%)" if escalated else ""
     logging.warning(
         f"MARGIN ALERT for {customer_name} (ID: {customer_id}): "
-        f"Margin {margin:.1f}% < {g.margin_below}%, "
-        f"Billed {billed_min:.1f} > {g.billed_above}{thresh_info}"
+        f"Margin {margin:.1f}% < {g.margin_below}%, Billed {billed_min:.1f} > {g.billed_above}"
     )
-    send_webhook(g, title,
-                 f"{customer_name} (ID: {customer_id}) Margin: {margin:.1f}% "
-                 f"(Billed: {billed_min:.1f} min)")
 
     if g.audio:
-        play_siren(
-            _siren_manager,
-            lambda: _siren_manager.play_alternating(g),
-            customer_name,
-            customer_id,
-            "MARGIN" if not escalated else "MARGIN ESCALATION",
-        )
+        _play_siren_async(mgr, mgr.play_alternating, f"MARGIN {customer_name} ({customer_id})")
 
 
 def trigger_recovery_alert(
@@ -221,7 +144,6 @@ def trigger_recovery_alert(
     settings: Settings,
     alert_type: str,
 ) -> None:
-    g = settings.global_
     if alert_type == "balance":
         title = "BALANCE RECOVERED"
         msg = f"{customer_name} (ID: {customer_id}) balance recovered to {recovered_value:.4f}"
@@ -229,37 +151,135 @@ def trigger_recovery_alert(
         title = "MARGIN RECOVERED"
         msg = f"{customer_name} (ID: {customer_id}) margin recovered to {recovered_value:.1f}%"
 
-    _safe_notify(
-        title=title,
-        message=msg,
-        timeout=10,
-    )
+    _safe_notify(title=title, message=msg, timeout=10)
     logging.info(msg)
-    send_webhook(g, title, msg)
-
-    _log_alert_event(customer_id, alert_type, "recovered", recovered_value, None)
 
 
-def trigger_test_alert(settings: Settings) -> bool:
+# -- Alert evaluation helpers used by monitor loop --
+
+_SIREN_MAX = 3
+_NOTIFY_MAX = 5
+
+
+def check_balance_alert(
+    mgr: SirenManager,
+    customer_id: str,
+    balance: float,
+    customer_name: str,
+    settings: Settings,
+) -> None:
+    w = settings.get_watch(customer_id)
+    threshold = w.resolve_balance_below()
+    cooldown = settings.global_.cooldown
+    state, count = get_alert_state(customer_id, "balance")
+
+    if balance < threshold:
+        if state == 0 and mgr.can_alert(customer_id, "balance", cooldown):
+            trigger_balance_alert(customer_id, balance, customer_name, settings, mgr)
+            set_alert_state(customer_id, "balance", 1, count=1)
+            print(f"  !! BALANCE ALERT for {customer_name} (ID: {customer_id})  [#1]")
+        elif state == 1 and mgr.can_alert(customer_id, "balance", cooldown):
+            new_count = count + 1
+            trigger_balance_alert_escalated(customer_id, balance, customer_name, settings, mgr, new_count)
+            set_alert_state(customer_id, "balance", 1, count=new_count)
+            print(f"  !! BALANCE ALERT for {customer_name} (ID: {customer_id})  [#{new_count}]")
+    elif state > 0 and balance >= threshold:
+        trigger_recovery_alert(customer_id, balance, customer_name, settings, "balance")
+        set_alert_state(customer_id, "balance", 0, count=0)
+
+
+def check_margin_alert(
+    mgr: SirenManager,
+    customer_id: str,
+    margin: float,
+    billed_min: float,
+    customer_name: str,
+    settings: Settings,
+    monitored: bool = False,
+) -> None:
+    if not monitored:
+        return
+
     g = settings.global_
-    title = "TEST ALERT"
-    msg = "This is a test alert from InstacallMonitor. Sirens and webhooks are working correctly."
+    w = settings.get_watch(customer_id)
+    threshold = w.resolve_margin_below(g.margin_below)
+    billed_threshold = w.resolve_billed_above(g.billed_above)
+    cooldown = g.cooldown
+    state, count = get_alert_state(customer_id, "margin")
 
-    _safe_notify(
-        title=title,
-        message=msg,
-        timeout=5,
-    )
-    logging.info("Test alert triggered.")
-    send_webhook(g, title, msg)
+    if margin < threshold and billed_min > billed_threshold:
+        if state == 0 and mgr.can_alert(customer_id, "margin", cooldown):
+            trigger_margin_alert(customer_id, margin, billed_min, customer_name, settings, mgr)
+            set_alert_state(customer_id, "margin", 1, count=1)
+            print(f"  !! MARGIN ALERT for {customer_name} (ID: {customer_id})  [#1]")
+        elif state == 1 and mgr.can_alert(customer_id, "margin", cooldown):
+            new_count = count + 1
+            trigger_margin_alert_escalated(customer_id, margin, billed_min, customer_name, settings, mgr, new_count)
+            set_alert_state(customer_id, "margin", 1, count=new_count)
+            print(f"  !! MARGIN ALERT for {customer_name} (ID: {customer_id})  [#{new_count}]")
+    elif state > 0 and (margin >= threshold or billed_min <= billed_threshold):
+        trigger_recovery_alert(customer_id, margin, customer_name, settings, "margin")
+        set_alert_state(customer_id, "margin", 0, count=0)
 
-    if g.audio:
-        play_siren(
-            _siren_manager,
-            lambda: _siren_manager.play_rising_falling(g),
-            "Test",
-            "TEST",
-            "TEST",
+
+def _should_siren(count: int) -> bool:
+    return count <= _SIREN_MAX
+
+
+def _should_notify(count: int) -> bool:
+    return count <= _NOTIFY_MAX
+
+
+def trigger_balance_alert_escalated(
+    customer_id: str,
+    balance: float,
+    customer_name: str,
+    settings: Settings,
+    mgr: SirenManager,
+    count: int,
+) -> None:
+    g = settings.global_
+    w = settings.get_watch(customer_id)
+    threshold = w.resolve_balance_below()
+
+    if _should_notify(count):
+        _safe_notify(
+            title=f"BALANCE ALERT [#{count}]",
+            message=f"{customer_name} (ID: {customer_id}) balance still at {balance:.4f}!",
+            timeout=10,
         )
+    logging.warning(
+        f"ALERT [#{count}] for {customer_name} (ID: {customer_id}): Balance {balance:.4f} < {threshold:+.1f}"
+    )
 
-    return True
+    if g.audio and _should_siren(count):
+        _play_siren_async(mgr, mgr.play_rising_falling, f"BALANCE #{count} {customer_name} ({customer_id})")
+
+
+def trigger_margin_alert_escalated(
+    customer_id: str,
+    margin: float,
+    billed_min: float,
+    customer_name: str,
+    settings: Settings,
+    mgr: SirenManager,
+    count: int,
+) -> None:
+    g = settings.global_
+
+    if _should_notify(count):
+        _safe_notify(
+            title=f"MARGIN ALERT [#{count}]",
+            message=(
+                f"{customer_name} (ID: {customer_id}) Margin still at {margin:.1f}%!"
+                f" (Billed: {billed_min:.1f} min)"
+            ),
+            timeout=10,
+        )
+    logging.warning(
+        f"MARGIN ALERT [#{count}] for {customer_name} (ID: {customer_id}): "
+        f"Margin {margin:.1f}% < {g.margin_below}%, Billed {billed_min:.1f} > {g.billed_above}"
+    )
+
+    if g.audio and _should_siren(count):
+        _play_siren_async(mgr, mgr.play_alternating, f"MARGIN #{count} {customer_name} ({customer_id})")
