@@ -10,10 +10,22 @@ from persistence import get_alert_state, set_alert_state
 
 
 class SirenManager:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        siren_loops: int = 10,
+        siren_min_freq: int = 2200,
+        siren_max_freq: int = 3500,
+        siren_step_freq: int = 130,
+        siren_tone_duration: int = 50,
+    ) -> None:
         self._lock = threading.Lock()
         self._playing = False
         self._timestamps: dict[str, float] = {}
+        self.siren_loops = siren_loops
+        self.siren_min_freq = siren_min_freq
+        self.siren_max_freq = siren_max_freq
+        self.siren_step_freq = siren_step_freq
+        self.siren_tone_duration = siren_tone_duration
 
     @property
     def is_playing(self) -> bool:
@@ -41,20 +53,17 @@ class SirenManager:
             self._playing = False
 
     def play_rising_falling(self) -> None:
-        freq_min, freq_max, step, duration = 2200, 3500, 130, 50
-        loops = 10
-        for _ in range(loops):
-            for freq in range(freq_min, freq_max, step):
-                _beep(freq, duration)
-            for freq in range(freq_max, freq_min, -step):
-                _beep(freq, duration)
+        for _ in range(self.siren_loops):
+            for freq in range(self.siren_min_freq, self.siren_max_freq, self.siren_step_freq):
+                _beep(freq, self.siren_tone_duration)
+            for freq in range(self.siren_max_freq, self.siren_min_freq, -self.siren_step_freq):
+                _beep(freq, self.siren_tone_duration)
 
     def play_alternating(self) -> None:
-        freq_min, freq_max = 2200, 3500
         tone = 100
-        for _ in range(20):
-            _beep(freq_min, tone)
-            _beep(freq_max, tone)
+        for _ in range(self.siren_loops * 2):
+            _beep(self.siren_min_freq, tone)
+            _beep(self.siren_max_freq, tone)
 
 
 def _beep(freq: int, duration: int) -> None:
@@ -84,7 +93,7 @@ def _play_siren_async(mgr: SirenManager, play_fn, label: str) -> None:
 def _safe_notify(title: str, message: str, timeout: int = 10) -> None:
     try:
         from plyer import notification
-        notification.notify(title=title, message=message, app_name="InstacallMonitor", timeout=timeout)
+        notification.notify(title=title, message=message, timeout=timeout)
     except Exception as e:
         logging.warning(f"Desktop notification failed: {e}")
 

@@ -71,6 +71,18 @@ class GlobalSettings:
     summary_interval: str = "5m"
     margin_below: float = 30.0
     billed_above: float = 70.0
+    siren_loops: int = 10
+    siren_min_freq: int = 2200
+    siren_max_freq: int = 3500
+    siren_step_freq: int = 130
+    siren_tone_duration: int = 50
+    max_workers: int = 4
+    retry_max_attempts: int = 3
+    retry_base_delay: float = 1.0
+    retry_max_delay: float = 30.0
+    retry_jitter_max: float = 1.0
+    circuit_failure_threshold: int = 5
+    circuit_recovery_timeout: float = 60.0
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> GlobalSettings:
@@ -159,22 +171,95 @@ def _fmt_val(val: Any) -> str:
     return str(val)
 
 
-def load_settings() -> Settings:
+_settings_mtime: float = 0.0
+_settings_version: int = 0
+
+
+def get_settings_mtime() -> float:
     try:
-        with open(SETTINGS_FILE, "rb") as f:
-            data = tomllib.load(f)
-        settings = Settings.from_dict(data)
-        if not settings.watch:
-            settings.watch = [WatchTarget(customer="18", balance_below=DEFAULT_BALANCE_BELOW)]
-        for w in settings.watch:
-            if w.balance_below is None:
-                w.balance_below = DEFAULT_BALANCE_BELOW
+        return os.path.getmtime(SETTINGS_FILE)
+    except OSError:
+        return 0.0
+
+
+def get_settings_version() -> int:
+    return _settings_version
+
+
+def _parse_settings_file() -> Settings:
+    with open(SETTINGS_FILE, "rb") as f:
+        data = tomllib.load(f)
+    settings = Settings.from_dict(data)
+    if not settings.watch:
+        settings.watch = [WatchTarget(customer="18", balance_below=DEFAULT_BALANCE_BELOW)]
+    for w in settings.watch:
+        if w.balance_below is None:
+            w.balance_below = DEFAULT_BALANCE_BELOW
+    return settings
+
+
+def load_settings() -> Settings:
+    global _settings_mtime, _settings_version
+    try:
+        _settings_mtime = get_settings_mtime()
+        settings = _parse_settings_file()
+        _settings_version = 1
         return settings
     except FileNotFoundError:
         return Settings(watch=[WatchTarget(customer="18", balance_below=DEFAULT_BALANCE_BELOW)])
     except Exception as e:
         logging.error(f"Corrupted settings file: {e}")
         return Settings(watch=[WatchTarget(customer="18", balance_below=DEFAULT_BALANCE_BELOW)])
+
+
+def reload_settings(current: Settings) -> Settings | None:
+    global _settings_mtime, _settings_version
+    try:
+        new_mtime = get_settings_mtime()
+    except OSError:
+        return None
+
+    if new_mtime <= _settings_mtime:
+        return None
+
+    try:
+        new_settings = _parse_settings_file()
+    except FileNotFoundError:
+        logging.warning("Settings file deleted; keeping current settings.")
+        return None
+    except Exception as e:
+        logging.warning(f"Settings reload failed (keeping current): {e}")
+        return None
+
+    _settings_mtime = new_mtime
+    _settings_version += 1
+
+    old_ids = set(current.customer_ids)
+    new_ids = set(new_settings.customer_ids)
+    added = sorted(new_ids - old_ids)
+    removed = sorted(old_ids - new_ids)
+
+    if added or removed:
+        parts: list[str] = []
+        if added:
+            parts.append(f"added {', '.join(added)}")
+        if removed:
+            parts.append(f"removed {', '.join(removed)}")
+        logging.info(f"Settings v{_settings_version}: {', '.join(parts)}")
+
+    for cid in new_ids & old_ids:
+        old_w = current.get_watch(cid)
+        new_w = new_settings.get_watch(cid)
+        changes: list[str] = []
+        for attr in ("balance_below", "margin_below", "billed_above"):
+            oval = getattr(old_w, attr, None)
+            nval = getattr(new_w, attr, None)
+            if oval != nval:
+                changes.append(f"{attr}: {oval} -> {nval}")
+        if changes:
+            logging.info(f"Settings v{_settings_version}: customer {cid} changed ({'; '.join(changes)})")
+
+    return new_settings
 
 
 def save_settings(settings: Settings) -> None:
@@ -243,6 +328,10 @@ def validate_settings(settings: Settings) -> list[str]:
         errors.append("db_retention_days must be >= 0")
     if g.summary_direction not in ("outbound", "inbound"):
         errors.append("summary_direction must be 'outbound' or 'inbound'")
+    if g.max_workers < 1:
+        errors.append("max_workers must be >= 1")
+    if g.retry_max_delay < g.retry_base_delay:
+        errors.append("retry_max_delay must be >= retry_base_delay")
 
     return errors
 

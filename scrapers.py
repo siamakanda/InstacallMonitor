@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import random
 import re
 import time
 import traceback
@@ -11,7 +12,8 @@ import requests
 from bs4 import BeautifulSoup, Tag
 
 from auth import perform_login
-from config import BASE_EDIT_URL, SUMMARY_REPORT_URL, Settings
+from circuit_breaker import CircuitBreaker
+from config import BASE_EDIT_URL, SUMMARY_REPORT_URL, GlobalSettings, Settings
 
 
 def _needs_relogin(response: requests.Response) -> bool:
@@ -31,6 +33,37 @@ SUMMARY_COLUMN_MAP: dict[int, str] = {
 }
 
 _RETRY_DELAYS = [2, 5]
+
+_balance_breaker = CircuitBreaker(name="balance")
+_summary_breaker = CircuitBreaker(name="summary_report")
+_retry_settings: GlobalSettings | None = None
+
+
+def configure_scrapers(settings: GlobalSettings) -> None:
+    global _retry_settings, _balance_breaker, _summary_breaker
+    _retry_settings = settings
+    _balance_breaker = CircuitBreaker(
+        name="balance",
+        failure_threshold=settings.circuit_failure_threshold,
+        recovery_timeout=settings.circuit_recovery_timeout,
+    )
+    _summary_breaker = CircuitBreaker(
+        name="summary_report",
+        failure_threshold=settings.circuit_failure_threshold,
+        recovery_timeout=settings.circuit_recovery_timeout,
+    )
+
+
+def _compute_retry_delays() -> list[float]:
+    if _retry_settings is None:
+        return list(_RETRY_DELAYS)
+    s = _retry_settings
+    delays: list[float] = []
+    for attempt in range(1, s.retry_max_attempts):
+        delay = min(s.retry_base_delay * (2 ** (attempt - 1)), s.retry_max_delay)
+        jitter = random.uniform(0, s.retry_jitter_max)
+        delays.append(delay + jitter)
+    return delays
 
 
 def _is_transient(error: str | None) -> bool:
@@ -203,24 +236,35 @@ def fetch_balance(session: requests.Session, customer_id: str, timeout: int = 10
     edit_url = f"{BASE_EDIT_URL}{customer_id}"
     last_error: Optional[str] = None
 
-    for attempt in range(len(_RETRY_DELAYS) + 1):
+    retry_delays = _compute_retry_delays()
+    total_attempts = 1 + len(retry_delays)
+
+    for attempt in range(total_attempts):
+        if not _balance_breaker.before_request():
+            last_error = f"circuit open (failures: {_balance_breaker.failure_count})"
+            return None, None, None, last_error
+
         try:
             resp = session.get(edit_url, timeout=timeout, allow_redirects=True)
             if _needs_relogin(resp):
                 logging.warning("Session expired. Re-logging in...")
                 if not perform_login(session, timeout):
                     last_error = "re-login failed"
-                    if attempt < len(_RETRY_DELAYS):
-                        time.sleep(_RETRY_DELAYS[attempt])
+                    _balance_breaker.on_failure()
+                    if attempt < len(retry_delays):
+                        time.sleep(retry_delays[attempt])
                         continue
                     return None, None, None, last_error
                 resp = session.get(edit_url, timeout=timeout, allow_redirects=True)
             if resp.status_code != 200:
                 last_error = f"HTTP {resp.status_code}"
-                if attempt < len(_RETRY_DELAYS) and resp.status_code >= 500:
-                    time.sleep(_RETRY_DELAYS[attempt])
+                if attempt < len(retry_delays) and resp.status_code >= 500:
+                    _balance_breaker.on_failure()
+                    time.sleep(retry_delays[attempt])
                     continue
+                _balance_breaker.on_failure()
                 return None, None, None, last_error
+            _balance_breaker.on_success()
             return parse_customer_page(resp.text)
         except requests.exceptions.Timeout:
             last_error = f"timeout ({timeout}s)"
@@ -229,8 +273,10 @@ def fetch_balance(session: requests.Session, customer_id: str, timeout: int = 10
         except Exception as e:
             logging.error(f"Customer {customer_id} - error: {e}\n{traceback.format_exc()}")
             last_error = str(e)
-        if attempt < len(_RETRY_DELAYS) and _is_transient(last_error):
-            time.sleep(_RETRY_DELAYS[attempt])
+
+        _balance_breaker.on_failure()
+        if attempt < len(retry_delays) and _is_transient(last_error):
+            time.sleep(retry_delays[attempt])
 
     return None, None, None, last_error
 
@@ -247,40 +293,53 @@ def fetch_summary_report(session: requests.Session, settings: Settings) -> tuple
     }
     last_error: Optional[str] = None
 
-    for attempt in range(len(_RETRY_DELAYS) + 1):
+    retry_delays = _compute_retry_delays()
+    total_attempts = 1 + len(retry_delays)
+
+    for attempt in range(total_attempts):
+        if not _summary_breaker.before_request():
+            last_error = f"circuit open (failures: {_summary_breaker.failure_count})"
+            return {}, last_error
+
         try:
             resp = session.get(SUMMARY_REPORT_URL, params=params, timeout=timeout, allow_redirects=True)
         except requests.exceptions.Timeout:
             last_error = f"timeout ({timeout}s)"
-            if attempt < len(_RETRY_DELAYS):
-                time.sleep(_RETRY_DELAYS[attempt])
+            _summary_breaker.on_failure()
+            if attempt < len(retry_delays):
+                time.sleep(retry_delays[attempt])
                 continue
             return {}, last_error
         except requests.exceptions.ConnectionError:
             last_error = "connection error"
-            if attempt < len(_RETRY_DELAYS):
-                time.sleep(_RETRY_DELAYS[attempt])
+            _summary_breaker.on_failure()
+            if attempt < len(retry_delays):
+                time.sleep(retry_delays[attempt])
                 continue
             return {}, last_error
         except Exception as e:
             logging.error(f"Summary - error: {e}\n{traceback.format_exc()}")
+            _summary_breaker.on_failure()
             return {}, str(e)
 
         if _needs_relogin(resp):
             logging.warning("Session expired. Re-logging in...")
             if not perform_login(session, timeout):
                 last_error = "re-login failed"
-                if attempt < len(_RETRY_DELAYS):
-                    time.sleep(_RETRY_DELAYS[attempt])
+                _summary_breaker.on_failure()
+                if attempt < len(retry_delays):
+                    time.sleep(retry_delays[attempt])
                     continue
                 return {}, last_error
             resp = session.get(SUMMARY_REPORT_URL, params=params, timeout=timeout, allow_redirects=True)
 
         if resp.status_code != 200:
             last_error = f"HTTP {resp.status_code}"
-            if attempt < len(_RETRY_DELAYS) and resp.status_code >= 500:
-                time.sleep(_RETRY_DELAYS[attempt])
+            if attempt < len(retry_delays) and resp.status_code >= 500:
+                _summary_breaker.on_failure()
+                time.sleep(retry_delays[attempt])
                 continue
+            _summary_breaker.on_failure()
             return {}, last_error
 
         try:
@@ -288,11 +347,14 @@ def fetch_summary_report(session: requests.Session, settings: Settings) -> tuple
         except Exception as e:
             last_error = f"parse error: {e}"
             logging.error(f"Summary parse error: {e}")
+            _summary_breaker.on_failure()
             return {}, last_error
 
         if results is None:
+            _summary_breaker.on_failure()
             return {}, "failed to parse summary page"
 
+        _summary_breaker.on_success()
         logging.info(f"Summary - {len(results)} customers found.")
         return results, None
 
