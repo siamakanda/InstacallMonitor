@@ -70,6 +70,8 @@ class GlobalSettings:
     summary_direction: str = "outbound"
     summary_interval: str = "5m"
     margin_below: float = 30.0
+    margin_above: float = 75.0
+    margin_deadband: float = 3.0
     billed_above: float = 70.0
     siren_loops: int = 10
     siren_min_freq: int = 2200
@@ -101,6 +103,8 @@ class WatchTarget:
     name: str = ""
     balance_below: Optional[float] = None
     margin_below: Optional[float] = None
+    margin_above: Optional[float] = None
+    margin_deadband: Optional[float] = None
     billed_above: Optional[float] = None
 
     def resolve_balance_below(self) -> float:
@@ -109,6 +113,12 @@ class WatchTarget:
     def resolve_margin_below(self, default: float) -> float:
         return self.margin_below if self.margin_below is not None else default
 
+    def resolve_margin_above(self, default: float) -> float:
+        return self.margin_above if self.margin_above is not None else default
+
+    def resolve_margin_deadband(self, default: float) -> float:
+        return self.margin_deadband if self.margin_deadband is not None else default
+
     def resolve_billed_above(self, default: float) -> float:
         return self.billed_above if self.billed_above is not None else default
 
@@ -116,7 +126,7 @@ class WatchTarget:
         result: dict[str, Any] = {"customer": self.customer}
         if self.name:
             result["name"] = self.name
-        for fname in ("balance_below", "margin_below", "billed_above"):
+        for fname in ("balance_below", "margin_below", "margin_above", "margin_deadband", "billed_above"):
             val = getattr(self, fname)
             if val is not None:
                 result[fname] = val
@@ -129,6 +139,8 @@ class WatchTarget:
             name=str(data.get("name", "")),
             balance_below=_coerce(data.get("balance_below"), Optional[float]),
             margin_below=_coerce(data.get("margin_below"), Optional[float]),
+            margin_above=_coerce(data.get("margin_above"), Optional[float]),
+            margin_deadband=_coerce(data.get("margin_deadband"), Optional[float]),
             billed_above=_coerce(data.get("billed_above"), Optional[float]),
         )
 
@@ -284,7 +296,7 @@ def save_settings(settings: Settings) -> None:
         if w.name:
             lines.append(f'name = "{w.name}"')
         lines.append(f"balance_below = {_fmt_val(w.balance_below)}")
-        for key in ("margin_below", "billed_above"):
+        for key in ("margin_below", "margin_above", "margin_deadband", "billed_above"):
             val = getattr(w, key)
             if val is not None:
                 lines.append(f"{key} = {_fmt_val(val)}")
@@ -324,6 +336,10 @@ def validate_settings(settings: Settings) -> list[str]:
 
     if g.cooldown < 0:
         errors.append("cooldown must be >= 0")
+    if g.margin_deadband < 0:
+        errors.append("margin_deadband must be >= 0")
+    if g.margin_above <= g.margin_below:
+        errors.append("margin_above must be > margin_below")
     if g.db_retention_days < 0:
         errors.append("db_retention_days must be >= 0")
     if g.summary_direction not in ("outbound", "inbound"):

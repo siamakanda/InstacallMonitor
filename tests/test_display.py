@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from display import dim, green, red, yellow
+from display import dim, green, magenta, red, yellow
 
 
 class TestDisplay:
@@ -17,6 +17,9 @@ class TestDisplay:
 
     def test_yellow(self) -> None:
         assert "\033[33m" in yellow("test")
+
+    def test_magenta(self) -> None:
+        assert "\033[35m" in magenta("test")
 
     def test_dim(self) -> None:
         assert "\033[2m" in dim("test")

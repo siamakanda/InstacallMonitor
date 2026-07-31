@@ -106,6 +106,18 @@ def _parse_args() -> dict[str, object]:
             except ValueError:
                 pass
             i += 2
+        elif a == "--margin-above" and i + 1 < len(argv):
+            try:
+                args["margin_above"] = float(argv[i + 1])
+            except ValueError:
+                pass
+            i += 2
+        elif a == "--margin-deadband" and i + 1 < len(argv):
+            try:
+                args["margin_deadband"] = float(argv[i + 1])
+            except ValueError:
+                pass
+            i += 2
         elif a == "--cooldown" and i + 1 < len(argv):
             try:
                 args["cooldown"] = int(argv[i + 1])
@@ -143,8 +155,10 @@ def _print_help() -> None:
     print("Options:")
     print("  --interval N         Check interval in seconds (overrides settings.toml)")
     print("  --balance-below N    Override all balance thresholds")
-    print("  --margin-below N     Override margin threshold (%)")
-    print("  --billed-above N    Override billed minutes threshold")
+    print("  --margin-below N     Override margin lower threshold (%)")
+    print("  --margin-above N     Override margin upper threshold (%)")
+    print("  --margin-deadband N  Override margin recovery deadband (%)")
+    print("  --billed-above N     Override billed minutes threshold")
     print("  --cooldown N         Alert cooldown in seconds")
     print("  --quiet              Suppress non-alert output")
     print("  --run-once           Run one check cycle and exit")
@@ -162,6 +176,10 @@ def _apply_cli_overrides(settings: Settings, args: dict[str, object]) -> Setting
         g.check_interval = int(args["interval"])
     if "margin_below" in args:
         g.margin_below = float(args["margin_below"])
+    if "margin_above" in args:
+        g.margin_above = float(args["margin_above"])
+    if "margin_deadband" in args:
+        g.margin_deadband = float(args["margin_deadband"])
     if "billed_above" in args:
         g.billed_above = float(args["billed_above"])
     if "cooldown" in args:
@@ -197,7 +215,11 @@ def _print_banner(settings: Settings) -> None:
     print(f"  {bold('InstacallMonitor')}  {dim(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))}")
     print(f"  {dim('─' * 50)}")
     print(f"  {bold(str(len(cids)))} customers monitored  |  Every {bold(str(g.check_interval))}s")
-    print(f"  Margin below {yellow(f'{g.margin_below:.0f}%')}  |  Billed above {yellow(f'{g.billed_above:.0f} min')}")
+    print(
+        f"  Margin range {yellow(f'{g.margin_below:.0f}%–{g.margin_above:.0f}%')}"
+        f"  |  Deadband {yellow(f'{g.margin_deadband:.0f}%')}"
+        f"  |  Billed above {yellow(f'{g.billed_above:.0f} min')}"
+    )
     for w in settings.watch:
         bal = w.resolve_balance_below()
         print(f"    {w.customer}:  balance below {red(f'{bal:+.1f}')}")
@@ -261,7 +283,8 @@ def _run_once(settings: Settings) -> None:
     if summary:
         for cid, data in summary.items():
             ts = datetime.now().strftime("%H:%M:%S")
-            print_summary_line(data, cid, monitored=(cid in settings.customer_ids), ts=ts)
+            print_summary_line(data, cid, monitored=(cid in settings.customer_ids), ts=ts,
+                               margin_below=g.margin_below, margin_above=g.margin_above)
             m = data.get("margin")
             b = data.get("billed_min")
             insert_margin(MarginRecord(
@@ -311,7 +334,7 @@ def _try_hot_reload(current: Settings, args: dict[str, object]) -> Settings:
         old_w = current.get_watch(cid)
         new_w = new_settings.get_watch(cid)
         changes: list[str] = []
-        for attr in ("balance_below", "margin_below", "billed_above"):
+        for attr in ("balance_below", "margin_below", "margin_above", "margin_deadband", "billed_above"):
             oval = getattr(old_w, attr, None)
             nval = getattr(new_w, attr, None)
             if oval != nval:
@@ -322,8 +345,11 @@ def _try_hot_reload(current: Settings, args: dict[str, object]) -> Settings:
     g1 = current.global_
     g2 = new_settings.global_
     g_changes: list[str] = []
-    for attr in ("check_interval", "cooldown", "margin_below", "billed_above", "max_workers",
-                 "audio", "circuit_failure_threshold", "circuit_recovery_timeout"):
+    for attr in (
+        "check_interval", "cooldown", "margin_below", "margin_above", "margin_deadband",
+        "billed_above", "max_workers", "audio", "circuit_failure_threshold",
+        "circuit_recovery_timeout",
+    ):
         ov = getattr(g1, attr, None)
         nv = getattr(g2, attr, None)
         if ov != nv:
@@ -457,7 +483,8 @@ def _monitor_loop(settings: Settings) -> None:
                 for cid, data in summary.items():
                     monitored = cid in customer_ids
                     ts = datetime.now().strftime("%H:%M:%S")
-                    print_summary_line(data, cid, monitored=monitored, ts=ts)
+                    print_summary_line(data, cid, monitored=monitored, ts=ts,
+                                       margin_below=g.margin_below, margin_above=g.margin_above)
 
                     margin = data.get("margin")
                     billed_min = data.get("billed_min")

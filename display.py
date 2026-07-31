@@ -40,6 +40,10 @@ def yellow(text: str) -> str:
     return _color(33, text)
 
 
+def magenta(text: str) -> str:
+    return _color(35, text)
+
+
 def cyan(text: str) -> str:
     return _color(36, text)
 
@@ -70,6 +74,8 @@ def print_summary_line(
     cid: str,
     monitored: bool = False,
     ts: str = "",
+    margin_below: float = 30.0,
+    margin_above: float = 75.0,
 ) -> None:
     tag = yellow("[M]") if monitored else dim("[M]")
     ts_part = f"[{ts}] " if ts else ""
@@ -79,10 +85,10 @@ def print_summary_line(
     mon = yellow(" [MONITORED]") if monitored else ""
 
     if isinstance(margin, (int, float)):
-        if margin < 30:
+        if margin < margin_below:
             m_str = red(f"{margin:.1f}%")
-        elif margin < 50:
-            m_str = yellow(f"{margin:.1f}%")
+        elif margin > margin_above:
+            m_str = magenta(f"{margin:.1f}%")
         else:
             m_str = green(f"{margin:.1f}%")
     else:

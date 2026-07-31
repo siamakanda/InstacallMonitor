@@ -13,6 +13,8 @@ class TestGlobalSettings:
         g = GlobalSettings()
         assert g.check_interval == 600
         assert g.margin_below == 30.0
+        assert g.margin_above == 75.0
+        assert g.margin_deadband == 3.0
         assert g.cooldown == 300
         assert g.audio is True
         assert g.billed_above == 70.0
@@ -48,6 +50,22 @@ class TestWatchTarget:
         w = WatchTarget(customer="18", billed_above=100.0)
         assert w.resolve_billed_above(70.0) == 100.0
 
+    def test_resolve_margin_above_default(self) -> None:
+        w = WatchTarget(customer="18")
+        assert w.resolve_margin_above(75.0) == 75.0
+
+    def test_resolve_margin_above_override(self) -> None:
+        w = WatchTarget(customer="18", margin_above=80.0)
+        assert w.resolve_margin_above(75.0) == 80.0
+
+    def test_resolve_margin_deadband_default(self) -> None:
+        w = WatchTarget(customer="18")
+        assert w.resolve_margin_deadband(3.0) == 3.0
+
+    def test_resolve_margin_deadband_override(self) -> None:
+        w = WatchTarget(customer="18", margin_deadband=5.0)
+        assert w.resolve_margin_deadband(3.0) == 5.0
+
 
 class TestSettings:
     def test_default_settings(self) -> None:
@@ -57,26 +75,36 @@ class TestSettings:
 
     def test_from_dict(self) -> None:
         data = {
-            "settings": {"check_interval": 120},
+            "settings": {"check_interval": 120, "margin_above": 80.0, "margin_deadband": 2.0},
             "watch": [
                 {"customer": "42", "balance_below": -500.0},
-                {"customer": "99", "balance_below": -200.0, "margin_below": 25.0},
+                {"customer": "99", "balance_below": -200.0, "margin_below": 25.0, "margin_above": 70.0},
             ],
         }
         s = Settings.from_dict(data)
         assert s.customer_ids == ["42", "99"]
         assert s.global_.check_interval == 120
+        assert s.global_.margin_above == 80.0
+        assert s.global_.margin_deadband == 2.0
         w99 = s.get_watch("99")
         assert w99.resolve_balance_below() == -200.0
         assert w99.resolve_margin_below(30.0) == 25.0
+        assert w99.resolve_margin_above(75.0) == 70.0
 
     def test_to_dict_roundtrip(self) -> None:
-        g = GlobalSettings(check_interval=60)
+        g = GlobalSettings(check_interval=60, margin_above=80.0)
         s = Settings(global_=g, watch=[WatchTarget(customer="18", balance_below=-500.0)])
         d = s.to_dict()
         s2 = Settings.from_dict(d)
         assert s2.customer_ids == s.customer_ids
         assert s2.global_.check_interval == s.global_.check_interval
+        assert s2.global_.margin_above == s.global_.margin_above
+
+    def test_to_dict_omits_none_fields(self) -> None:
+        w = WatchTarget(customer="18", balance_below=-500.0)
+        d = w.to_dict()
+        assert "margin_above" not in d
+        assert "margin_deadband" not in d
 
     def test_get_watch_returns_defaults(self) -> None:
         s = Settings(watch=[WatchTarget(customer="18", balance_below=-365.0)])
@@ -108,3 +136,15 @@ class TestSettings:
         s = Settings(global_=g, watch=[WatchTarget(customer="1", balance_below=-365.0)])
         errors = validate_settings(s)
         assert any("cooldown" in e for e in errors)
+
+    def test_validate_margin_above_less_than_below(self) -> None:
+        g = GlobalSettings(margin_below=50.0, margin_above=40.0)
+        s = Settings(global_=g, watch=[WatchTarget(customer="1", balance_below=-365.0)])
+        errors = validate_settings(s)
+        assert any("margin_above" in e for e in errors)
+
+    def test_validate_negative_deadband(self) -> None:
+        g = GlobalSettings(margin_deadband=-1)
+        s = Settings(global_=g, watch=[WatchTarget(customer="1", balance_below=-365.0)])
+        errors = validate_settings(s)
+        assert any("margin_deadband" in e for e in errors)
