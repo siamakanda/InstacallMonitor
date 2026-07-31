@@ -39,17 +39,21 @@ python monitor.py
 
 - **Balance monitoring** — polls customer edit pages, alerts when balance drops below threshold
 - **Margin & Billed Min monitoring** — scrapes the Executive Summary report for per-customer margin and billed minutes
-- **Per-customer thresholds** — global defaults + per-customer overrides for balance, margin, and billed min
-- **Escalation** — two-tier thresholds (primary + rearm) with persistent alert state across restarts
-- **Dual siren patterns** — rising/falling sweep (balance) vs alternating two-tone (margin)
+- **Margin range with deadband** — alerts fire when margin is outside a normal range (e.g. 30%–75%). A deadband zone prevents alert/recovery flapping near thresholds.
+- **Direction-aware margin alerts** — distinct siren patterns: alternating two-tone for margin too low, steady pulse for margin too high
+- **Per-customer thresholds** — global defaults + per-customer overrides for balance, margin range, deadband, and billed min
+- **Escalation** — two-tier thresholds with persistent alert state across restarts, auto-recovery when values return to range
+- **Triple siren patterns** — rising/falling sweep (balance), alternating two-tone (margin low), steady pulse (margin high)
 - **Non-blocking alerts** — sirens play in background threads, monitoring continues
 - **Desktop notifications** — Windows toast notifications via `plyer`
 - **Alert cooldown** — configurable cooldown per customer to prevent alert storms
 - **SQLite history** — persistent balance, margin, and alert_state tables with auto-retention
 - **CSV export** — export balance/margin history for reporting
-- **Crash recovery** — auto-restarts after 10s on unexpected errors
+- **Circuit breaker** — automatic circuit breaking for balance and summary report endpoints to avoid hammering the server on failures
+- **Retry with backoff** — configurable exponential backoff with jitter for transient errors
+- **Hot-reload** — settings reloaded from `settings.toml` without restart
 - **DB dedup** — skips duplicate inserts when values haven't changed
-- **Priority-aware display** — balance lines `[B]`, margin lines `[M]`, monitored flag
+- **Priority-aware display** — balance lines `[B]`, margin lines `[M]`, monitored flag, color-coded by threshold range
 
 ## Usage
 
@@ -67,17 +71,24 @@ python monitor.py --help       # show all options
 | `--quiet` | Suppress non-essential console output |
 | `--interval N` | Override check interval (seconds) |
 | `--balance-below N` | Override global balance alert threshold |
-| `--margin-below N` | Override global margin alert threshold |
+| `--margin-below N` | Override global margin lower threshold |
+| `--margin-above N` | Override global margin upper threshold |
+| `--margin-deadband N` | Override margin recovery deadband (%) |
+| `--billed-above N` | Override billed minutes threshold |
+| `--cooldown N` | Override alert cooldown (seconds) |
+| `--export-customer ID` | Export history for a specific customer |
+| `--no-hot-reload` | Disable settings hot-reload |
 
 ## Console Output
 
 ```
-  InstacallMonitor  2026-07-29 23:45:00
+  InstacallMonitor  2026-08-01 23:45:00
   ──────────────────────────────────────────────────
   1 customers monitored  |  Every 30s
-  Margin below 30%  |  Billed above 70 min
+  Margin range 30%–75%  |  Deadband 3%  |  Billed above 70 min
     18:  balance below -500.0
   Audio  ON  |  Cooldown 300s  |  DB retention 30d
+  Workers 4  |  Hot-reload ON
   Ctrl+C to stop.
 
   [23:45:01] [B] TestCo (ID: 18)  Balance -229.8235  / Credit: 600.00
@@ -109,6 +120,8 @@ siren_tone_duration = 50          # duration of each beep (ms)
 
 # Global defaults (applied to ALL customers in summary report)
 margin_below = 30.0               # alert when margin drops below this %
+margin_above = 75.0               # alert when margin surges above this %
+margin_deadband = 3.0             # must recover this far inside range before clearing alert
 billed_above = 70.0               # only alert if billed minutes exceed this
 ```
 
@@ -127,18 +140,21 @@ balance_below = -500.0            # REQUIRED — balance alert for this customer
 customer = "42"
 name = "GlobalTel"
 balance_below = -200.0            # different threshold per customer
-margin_below = 25.0               # override global margin for this customer
+margin_below = 25.0               # override global margin lower bound
+margin_above = 80.0               # override global margin upper bound
+margin_deadband = 5.0             # override global margin deadband
 # billed_above = 100.0            # override global billed-min for this customer
 ```
 
 ### How overrides resolve
 
 | Field | Priority |
-|---|---|
+|---|---|---|
 | `balance_below` | **Per-customer only** — no global default, must be set in `[[watch]]` |
-| `balance_critical` | Per-customer → default is same as that customer's `balance_below` (no escalation) |  
-| `margin_below` | Per-customer override → `[settings]` global default |
-| `billed_above` | Per-customer override → `[settings]` global default |
+| `margin_below` | Per-customer override → `[settings]` global default (30%) |
+| `margin_above` | Per-customer override → `[settings]` global default (75%) |
+| `margin_deadband` | Per-customer override → `[settings]` global default (3%) |
+| `billed_above` | Per-customer override → `[settings]` global default (70 min) |
 
 ## Architecture
 
@@ -148,12 +164,13 @@ InstacallMonitor/
   config.py            — Settings dataclasses, TOML load/save, validation, profiles
   auth.py              — CSRF login, session creation
   scrapers.py          — HTML parsers + fetch_balance + fetch_summary_report, retry logic
-  alerts.py            — SirenManager, desktop notifications, alert escalation
+  alerts.py            — SirenManager, desktop notifications, alert escalation, deadband logic
   display.py           — Console formatting, ANSI colors, [B]/[M] prefixes
   persistence.py       — SQLite ORM (balance, margin, alert_state tables), CSV export
+  circuit_breaker.py   — Circuit breaker pattern for resilient HTTP requests
   settings.toml        — Runtime configuration (global + per-customer overrides)
   .env                 — Portal credentials (never committed)
-  tests/               — 46 pytest tests
+  tests/               — 76 pytest tests
 ```
 
 ## Files (Runtime)
