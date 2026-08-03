@@ -112,6 +112,8 @@ def trigger_balance_alert(
     settings: Settings,
     mgr: SirenManager,
 ) -> None:
+    global _alert_triggered_this_session
+    _alert_triggered_this_session += 1
     g = settings.global_
     w = settings.get_watch(customer_id)
     threshold = w.resolve_balance_below()
@@ -138,6 +140,8 @@ def trigger_margin_alert(
     mgr: SirenManager,
     direction: str = "low",
 ) -> None:
+    global _alert_triggered_this_session
+    _alert_triggered_this_session += 1
     g = settings.global_
 
     if direction == "low":
@@ -184,6 +188,11 @@ def trigger_recovery_alert(
 
 _SIREN_MAX = 3
 _NOTIFY_MAX = 5
+_alert_triggered_this_session = 0
+
+
+def get_session_alert_count() -> int:
+    return _alert_triggered_this_session
 
 
 def check_balance_alert(
@@ -196,7 +205,7 @@ def check_balance_alert(
     w = settings.get_watch(customer_id)
     threshold = w.resolve_balance_below()
     cooldown = settings.global_.cooldown
-    state, count = get_alert_state(customer_id, "balance")
+    state, count, _direction = get_alert_state(customer_id, "balance")
 
     if balance < threshold:
         if state == 0 and mgr.can_alert(customer_id, "balance", cooldown):
@@ -232,7 +241,7 @@ def check_margin_alert(
     db = w.resolve_margin_deadband(g.margin_deadband)
     billed_threshold = w.resolve_billed_above(g.billed_above)
     cooldown = g.cooldown
-    state, count = get_alert_state(customer_id, "margin")
+    state, count, prev_direction = get_alert_state(customer_id, "margin")
 
     bill_qualifies = billed_min > billed_threshold
     in_deadband = (low <= margin < low + db) or (high - db < margin <= high)
@@ -249,7 +258,7 @@ def check_margin_alert(
                     customer_id, margin, billed_min, customer_name, settings, mgr,
                     direction=direction,
                 )
-                set_alert_state(customer_id, "margin", 1, count=1)
+                set_alert_state(customer_id, "margin", 1, count=1, direction=direction)
                 direction_tag = direction.upper()
                 print(f"  !! MARGIN ALERT ({direction_tag}) for {customer_name} (ID: {customer_id})  [#1]")
             elif state == 1 and mgr.can_alert(customer_id, "margin", cooldown):
@@ -258,12 +267,12 @@ def check_margin_alert(
                     customer_id, margin, billed_min, customer_name, settings, mgr, new_count,
                     direction=direction,
                 )
-                set_alert_state(customer_id, "margin", 1, count=new_count)
+                set_alert_state(customer_id, "margin", 1, count=new_count, direction=direction)
                 direction_tag = direction.upper()
                 print(f"  !! MARGIN ALERT ({direction_tag}) for {customer_name} (ID: {customer_id})  [#{new_count}]")
     elif state > 0 and (in_range or not bill_qualifies):
-        trigger_recovery_alert(customer_id, margin, customer_name, settings, "margin", direction=direction)
-        set_alert_state(customer_id, "margin", 0, count=0)
+        trigger_recovery_alert(customer_id, margin, customer_name, settings, "margin", direction=prev_direction)
+        set_alert_state(customer_id, "margin", 0, count=0, direction="")
 
 
 def _should_siren(count: int) -> bool:
@@ -282,6 +291,8 @@ def trigger_balance_alert_escalated(
     mgr: SirenManager,
     count: int,
 ) -> None:
+    global _alert_triggered_this_session
+    _alert_triggered_this_session += 1
     g = settings.global_
     w = settings.get_watch(customer_id)
     threshold = w.resolve_balance_below()
@@ -310,6 +321,8 @@ def trigger_margin_alert_escalated(
     count: int,
     direction: str = "low",
 ) -> None:
+    global _alert_triggered_this_session
+    _alert_triggered_this_session += 1
     g = settings.global_
 
     if direction == "low":

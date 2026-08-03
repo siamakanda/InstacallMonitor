@@ -42,16 +42,10 @@ _retry_settings: GlobalSettings | None = None
 def configure_scrapers(settings: GlobalSettings) -> None:
     global _retry_settings, _balance_breaker, _summary_breaker
     _retry_settings = settings
-    _balance_breaker = CircuitBreaker(
-        name="balance",
-        failure_threshold=settings.circuit_failure_threshold,
-        recovery_timeout=settings.circuit_recovery_timeout,
-    )
-    _summary_breaker = CircuitBreaker(
-        name="summary_report",
-        failure_threshold=settings.circuit_failure_threshold,
-        recovery_timeout=settings.circuit_recovery_timeout,
-    )
+    _balance_breaker.failure_threshold = settings.circuit_failure_threshold
+    _balance_breaker.recovery_timeout = settings.circuit_recovery_timeout
+    _summary_breaker.failure_threshold = settings.circuit_failure_threshold
+    _summary_breaker.recovery_timeout = settings.circuit_recovery_timeout
 
 
 def _compute_retry_delays() -> list[float]:
@@ -192,36 +186,34 @@ def parse_summary_page(html: str) -> Optional[SummaryDict]:
         vol_name = cells[1].find("span", class_="sr-vol-name")
         customer_name = vol_name.get_text(strip=True) if vol_name else "N/A"
 
-        billed_min: Optional[float] = None
-        billed_span = cells[7].find("span", class_="rpt-num")
-        if billed_span:
-            try:
-                billed_min = float(billed_span.get_text(strip=True).replace(",", ""))
-            except ValueError:
-                pass
-
-        margin: Optional[float] = None
-        margin_span = cells[12].find("span", class_="rpt-asr-pill")
-        if margin_span:
-            text = margin_span.get_text(strip=True).replace("%", "")
-            try:
-                margin = float(text)
-            except ValueError:
-                pass
-
-        row_data: dict[str, object] = {
-            "name": customer_name,
-            "margin": margin,
-            "billed_min": billed_min,
-        }
+        row_data: dict[str, object] = {"name": customer_name}
 
         for cell_idx, field_name in effective_map.items():
-            if field_name in ("billed_min", "margin"):
-                continue
             if cell_idx < len(cells):
                 val = _extract_cell_value(cells[cell_idx])
                 if val is not None:
                     row_data[field_name] = val
+
+        if "billed_min" not in row_data:
+            billed_min: Optional[float] = None
+            billed_span = cells[7].find("span", class_="rpt-num") if len(cells) > 7 else None
+            if billed_span:
+                try:
+                    billed_min = float(billed_span.get_text(strip=True).replace(",", ""))
+                except ValueError:
+                    pass
+            row_data["billed_min"] = billed_min
+
+        if "margin" not in row_data:
+            margin: Optional[float] = None
+            margin_span = cells[12].find("span", class_="rpt-asr-pill") if len(cells) > 12 else None
+            if margin_span:
+                text = margin_span.get_text(strip=True).replace("%", "")
+                try:
+                    margin = float(text)
+                except ValueError:
+                    pass
+            row_data["margin"] = margin
 
         expand_btn = cells[0].find("button", class_="sr-expand-btn")
         if expand_btn and expand_btn.get("onclick"):
@@ -262,7 +254,8 @@ def fetch_balance(session: requests.Session, customer_id: str, timeout: int = 10
                     _balance_breaker.on_failure()
                     time.sleep(retry_delays[attempt])
                     continue
-                _balance_breaker.on_failure()
+                if resp.status_code >= 500:
+                    _balance_breaker.on_failure()
                 return None, None, None, last_error
             _balance_breaker.on_success()
             return parse_customer_page(resp.text)
@@ -339,7 +332,8 @@ def fetch_summary_report(session: requests.Session, settings: Settings) -> tuple
                 _summary_breaker.on_failure()
                 time.sleep(retry_delays[attempt])
                 continue
-            _summary_breaker.on_failure()
+            if resp.status_code >= 500:
+                _summary_breaker.on_failure()
             return {}, last_error
 
         try:
@@ -347,11 +341,15 @@ def fetch_summary_report(session: requests.Session, settings: Settings) -> tuple
         except Exception as e:
             last_error = f"parse error: {e}"
             logging.error(f"Summary parse error: {e}")
-            _summary_breaker.on_failure()
+            if attempt < len(retry_delays):
+                time.sleep(retry_delays[attempt])
+                continue
             return {}, last_error
 
         if results is None:
-            _summary_breaker.on_failure()
+            if attempt < len(retry_delays):
+                time.sleep(retry_delays[attempt])
+                continue
             return {}, "failed to parse summary page"
 
         _summary_breaker.on_success()

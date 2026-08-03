@@ -81,10 +81,14 @@ def _get_connection() -> sqlite3.Connection:
 def init_db() -> None:
     with _get_connection() as conn:
         conn.executescript(CREATE_TABLES_SQL)
-        try:
-            conn.execute("ALTER TABLE alert_state ADD COLUMN alert_count INTEGER NOT NULL DEFAULT 0")
-        except sqlite3.OperationalError:
-            pass
+        for migration in (
+            "ALTER TABLE alert_state ADD COLUMN alert_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE alert_state ADD COLUMN direction TEXT",
+        ):
+            try:
+                conn.execute(migration)
+            except sqlite3.OperationalError:
+                pass
 
 
 def insert_balance(record: BalanceRecord) -> None:
@@ -110,17 +114,17 @@ def insert_margin(record: MarginRecord) -> None:
 def get_balance_history(
     customer_id: Optional[str] = None, hours: int = 24, limit: int = 500
 ) -> list[dict[str, object]]:
-    cutoff = datetime.now().isoformat()
+    cutoff = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with _get_connection() as conn:
         if customer_id:
             rows = conn.execute(
-                "SELECT * FROM balance_history WHERE customer_id = ? AND recorded_at > datetime(?, ?) "
+                "SELECT * FROM balance_history WHERE customer_id = ? AND recorded_at > datetime(?, 'localtime', ?) "
                 "ORDER BY recorded_at DESC LIMIT ?",
                 (customer_id, cutoff, f"-{hours} hours", limit),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT * FROM balance_history WHERE recorded_at > datetime(?, ?) "
+                "SELECT * FROM balance_history WHERE recorded_at > datetime(?, 'localtime', ?) "
                 "ORDER BY recorded_at DESC LIMIT ?",
                 (cutoff, f"-{hours} hours", limit),
             ).fetchall()
@@ -131,17 +135,17 @@ def get_balance_history(
 def get_margin_history(
     customer_id: Optional[str] = None, hours: int = 24, limit: int = 500
 ) -> list[dict[str, object]]:
-    cutoff = datetime.now().isoformat()
+    cutoff = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with _get_connection() as conn:
         if customer_id:
             rows = conn.execute(
-                "SELECT * FROM margin_history WHERE customer_id = ? AND recorded_at > datetime(?, ?) "
+                "SELECT * FROM margin_history WHERE customer_id = ? AND recorded_at > datetime(?, 'localtime', ?) "
                 "ORDER BY recorded_at DESC LIMIT ?",
                 (customer_id, cutoff, f"-{hours} hours", limit),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT * FROM margin_history WHERE recorded_at > datetime(?, ?) "
+                "SELECT * FROM margin_history WHERE recorded_at > datetime(?, 'localtime', ?) "
                 "ORDER BY recorded_at DESC LIMIT ?",
                 (cutoff, f"-{hours} hours", limit),
             ).fetchall()
@@ -164,22 +168,24 @@ def purge_old_records(retention_days: int) -> int:
     return total
 
 
-def get_alert_state(customer_id: str, alert_type: str) -> tuple[int, int]:
+def get_alert_state(customer_id: str, alert_type: str) -> tuple[int, int, str]:
     with _get_connection() as conn:
         row = conn.execute(
-            "SELECT state, alert_count FROM alert_state WHERE customer_id = ? AND alert_type = ?",
+            "SELECT state, alert_count, coalesce(direction, '') "
+            "FROM alert_state WHERE customer_id = ? AND alert_type = ?",
             (customer_id, alert_type),
         ).fetchone()
-        return (row[0], row[1]) if row else (0, 0)
+        return (row[0], row[1], row[2] or "") if row else (0, 0, "")
 
 
-def set_alert_state(customer_id: str, alert_type: str, state: int, count: int = 0) -> None:
+def set_alert_state(customer_id: str, alert_type: str, state: int, count: int = 0, direction: str = "") -> None:
     ts = _now() if state != 0 else None
     with _get_connection() as conn:
         conn.execute(
-            "INSERT OR REPLACE INTO alert_state (customer_id, alert_type, state, alert_count, last_alerted_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (customer_id, alert_type, state, count, ts),
+            "INSERT OR REPLACE INTO alert_state "
+            "(customer_id, alert_type, state, alert_count, last_alerted_at, direction) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (customer_id, alert_type, state, count, ts, direction if state != 0 else None),
         )
         conn.commit()
 

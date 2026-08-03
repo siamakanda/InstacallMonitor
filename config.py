@@ -183,7 +183,60 @@ def _fmt_val(val: Any) -> str:
     return str(val)
 
 
-_settings_mtime: float = 0.0
+_SETTINGS_TEMPLATE = """\
+# InstacallMonitor Settings
+# Edit this file to configure monitoring thresholds and watch targets.
+# Changes take effect on the next check cycle (hot-reload).
+
+[settings]
+# Interval between check cycles, in seconds
+check_interval = 600
+# HTTP request timeout, in seconds
+request_timeout = 10
+# Enable audible siren alerts (Windows only)
+audio = true
+# Minimum seconds between repeated alerts for the same customer
+cooldown = 300
+# Days of history to keep in the database
+db_retention_days = 30
+# Summary direction: "outbound" or "inbound"
+summary_direction = "outbound"
+# Summary interval: "5m", "15m", "1h", "24h" etc.
+summary_interval = "5m"
+# Margin below this percentage triggers low-margin alert
+margin_below = 30.0
+# Margin above this percentage triggers high-margin alert
+margin_above = 75.0
+# Recovery deadband prevents alert flapping (must be < half the margin range)
+margin_deadband = 3.0
+# Only alert when billed minutes exceed this value
+billed_above = 70.0
+# Number of concurrent worker threads for scraping
+max_workers = 4
+# Siren sound parameters
+siren_loops = 10
+siren_min_freq = 2200
+siren_max_freq = 3500
+siren_step_freq = 130
+siren_tone_duration = 50
+# Retry behaviour for transient failures
+retry_max_attempts = 3
+retry_base_delay = 1.0
+retry_max_delay = 30.0
+retry_jitter_max = 1.0
+# Circuit breaker — opens after N consecutive failures, recovers after timeout
+circuit_failure_threshold = 5
+circuit_recovery_timeout = 60.0
+
+# Add one [[watch]] block for each customer to monitor.
+# The "customer" field is the numeric customer ID from the Instacall portal.
+# All other fields are optional overrides of the global defaults above.
+
+[[watch]]
+customer = "18"
+name = ""
+balance_below = -500.0
+"""
 _settings_version: int = 0
 
 
@@ -218,10 +271,20 @@ def load_settings() -> Settings:
         _settings_version = 1
         return settings
     except FileNotFoundError:
+        _write_template()
         return Settings(watch=[WatchTarget(customer="18", balance_below=DEFAULT_BALANCE_BELOW)])
     except Exception as e:
         logging.error(f"Corrupted settings file: {e}")
         return Settings(watch=[WatchTarget(customer="18", balance_below=DEFAULT_BALANCE_BELOW)])
+
+
+def _write_template() -> None:
+    try:
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            f.write(_SETTINGS_TEMPLATE)
+        logging.info(f"Created settings template at {SETTINGS_FILE}")
+    except OSError:
+        pass
 
 
 def reload_settings(current: Settings) -> Settings | None:
@@ -323,31 +386,37 @@ def validate_settings(settings: Settings) -> list[str]:
     g = settings.global_
 
     if not settings.watch:
-        errors.append("At least one [[watch]] customer must be configured")
+        errors.append("at least one [[watch]] block is required in settings.toml")
     else:
         for w in settings.watch:
             if w.balance_below is None:
-                errors.append(f"watch customer '{w.customer}' is missing balance_below")
+                errors.append(f"customer '{w.customer}' is missing 'balance_below' — set it in their [[watch]] block")
 
-    for key in ("check_interval", "request_timeout"):
-        val = getattr(g, key, 0)
-        if not isinstance(val, (int, float)) or val <= 0:
-            errors.append(f"{key} must be a positive number")
+    if g.check_interval <= 0:
+        errors.append(f"check_interval must be > 0 (got {g.check_interval})")
+    if g.request_timeout <= 0:
+        errors.append(f"request_timeout must be > 0 (got {g.request_timeout})")
 
     if g.cooldown < 0:
-        errors.append("cooldown must be >= 0")
+        errors.append(f"cooldown must be >= 0 (got {g.cooldown})")
     if g.margin_deadband < 0:
-        errors.append("margin_deadband must be >= 0")
+        errors.append(f"margin_deadband must be >= 0 (got {g.margin_deadband})")
+    margin_range_half = (g.margin_above - g.margin_below) / 2
     if g.margin_above <= g.margin_below:
-        errors.append("margin_above must be > margin_below")
+        errors.append(f"margin_above ({g.margin_above}) must be > margin_below ({g.margin_below})")
+    elif g.margin_deadband >= margin_range_half:
+        errors.append(
+            f"margin_deadband ({g.margin_deadband}) must be < "
+            f"(margin_above - margin_below) / 2 = {margin_range_half:.1f}"
+        )
     if g.db_retention_days < 0:
-        errors.append("db_retention_days must be >= 0")
+        errors.append(f"db_retention_days must be >= 0 (got {g.db_retention_days})")
     if g.summary_direction not in ("outbound", "inbound"):
-        errors.append("summary_direction must be 'outbound' or 'inbound'")
+        errors.append(f"summary_direction must be 'outbound' or 'inbound' (got '{g.summary_direction}')")
     if g.max_workers < 1:
-        errors.append("max_workers must be >= 1")
+        errors.append(f"max_workers must be >= 1 (got {g.max_workers})")
     if g.retry_max_delay < g.retry_base_delay:
-        errors.append("retry_max_delay must be >= retry_base_delay")
+        errors.append(f"retry_max_delay ({g.retry_max_delay}) must be >= retry_base_delay ({g.retry_base_delay})")
 
     return errors
 

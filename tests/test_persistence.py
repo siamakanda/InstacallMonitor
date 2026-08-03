@@ -97,19 +97,22 @@ class TestPersistence:
     def test_alert_state(self, temp_db: str) -> None:
         from persistence import get_alert_state, set_alert_state
 
-        state, count = get_alert_state("18", "balance")
+        state, count, direction = get_alert_state("18", "balance")
         assert state == 0
         assert count == 0
+        assert direction == ""
 
-        set_alert_state("18", "balance", 1, count=1)
-        state, count = get_alert_state("18", "balance")
+        set_alert_state("18", "balance", 1, count=1, direction="low")
+        state, count, direction = get_alert_state("18", "balance")
         assert state == 1
         assert count == 1
+        assert direction == "low"
 
-        set_alert_state("18", "balance", 0, count=0)
-        state, count = get_alert_state("18", "balance")
+        set_alert_state("18", "balance", 0, count=0, direction="")
+        state, count, direction = get_alert_state("18", "balance")
         assert state == 0
         assert count == 0
+        assert direction == ""
 
     def test_csv_export(self, temp_db: str) -> None:
         from persistence import export_balance_csv, export_margin_csv

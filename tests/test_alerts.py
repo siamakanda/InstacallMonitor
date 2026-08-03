@@ -56,7 +56,7 @@ class TestMarginAlert:
         settings = self._make_settings()
         mgr = SirenManager()
 
-        with patch("alerts.get_alert_state", return_value=(0, 0)), \
+        with patch("alerts.get_alert_state", return_value=(0, 0, "")), \
              patch("alerts.set_alert_state"), \
              patch("alerts._safe_notify"), \
              patch("alerts._play_siren_async") as mock_siren:
@@ -67,7 +67,7 @@ class TestMarginAlert:
         settings = self._make_settings()
         mgr = SirenManager()
 
-        with patch("alerts.get_alert_state", return_value=(0, 0)), \
+        with patch("alerts.get_alert_state", return_value=(0, 0, "")), \
              patch("alerts.set_alert_state"), \
              patch("alerts._safe_notify"), \
              patch("alerts._play_siren_async") as mock_siren:
@@ -78,7 +78,7 @@ class TestMarginAlert:
         settings = self._make_settings()
         mgr = SirenManager()
 
-        with patch("alerts.get_alert_state", return_value=(0, 0)), \
+        with patch("alerts.get_alert_state", return_value=(0, 0, "")), \
              patch("alerts.set_alert_state"), \
              patch("alerts._play_siren_async") as mock_siren:
             check_margin_alert(mgr, "18", 50.0, 100.0, "TestCo", settings, monitored=True)
@@ -88,7 +88,7 @@ class TestMarginAlert:
         settings = self._make_settings()
         mgr = SirenManager()
 
-        with patch("alerts.get_alert_state", return_value=(0, 0)), \
+        with patch("alerts.get_alert_state", return_value=(0, 0, "")), \
              patch("alerts.set_alert_state"), \
              patch("alerts._play_siren_async") as mock_siren:
             check_margin_alert(mgr, "18", 31.0, 100.0, "TestCo", settings, monitored=True)
@@ -98,7 +98,7 @@ class TestMarginAlert:
         settings = self._make_settings()
         mgr = SirenManager()
 
-        with patch("alerts.get_alert_state", return_value=(0, 0)), \
+        with patch("alerts.get_alert_state", return_value=(0, 0, "")), \
              patch("alerts.set_alert_state"), \
              patch("alerts._play_siren_async") as mock_siren:
             check_margin_alert(mgr, "18", 73.0, 100.0, "TestCo", settings, monitored=True)
@@ -108,7 +108,7 @@ class TestMarginAlert:
         settings = self._make_settings(billed_above=70.0)
         mgr = SirenManager()
 
-        with patch("alerts.get_alert_state", return_value=(0, 0)), \
+        with patch("alerts.get_alert_state", return_value=(0, 0, "")), \
              patch("alerts._play_siren_async") as mock_siren:
             check_margin_alert(mgr, "18", 22.0, 50.0, "TestCo", settings, monitored=True)
             mock_siren.assert_not_called()
@@ -120,11 +120,11 @@ class TestMarginAlert:
         settings = self._make_settings()
         mgr = SirenManager()
 
-        with patch("alerts.get_alert_state", return_value=(1, 1)), \
+        with patch("alerts.get_alert_state", return_value=(1, 1, "low")), \
              patch("alerts.set_alert_state") as mock_set, \
              patch("alerts._safe_notify"):
             check_margin_alert(mgr, "18", 40.0, 100.0, "TestCo", settings, monitored=True)
-            mock_set.assert_called_with("18", "margin", 0, count=0)
+            mock_set.assert_called_with("18", "margin", 0, count=0, direction="")
 
     def test_unmonitored_skips_alert(self) -> None:
         settings = self._make_settings()

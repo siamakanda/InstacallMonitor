@@ -14,8 +14,9 @@ from datetime import datetime
 from typing import Optional
 
 import auth
-from alerts import SirenManager, check_balance_alert, check_margin_alert
+from alerts import SirenManager, check_balance_alert, check_margin_alert, get_session_alert_count
 from config import (
+    SETTINGS_FILE,
     Settings,
     get_credentials,
     get_settings_version,
@@ -45,6 +46,7 @@ _ERROR_COUNT = 0
 _LAST_ERROR: Optional[str] = None
 _LAST_CHECK: Optional[str] = None
 _STATUS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "monitor.status")
+_LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "balance_monitor.log")
 
 
 def _write_health_status(settings: Settings) -> None:
@@ -68,6 +70,29 @@ def _write_health_status(settings: Settings) -> None:
         pass
 
 
+def _login_with_spinner(session, timeout: int) -> bool:
+    result_holder: list[bool] = []
+    done = threading.Event()
+
+    def _do_login() -> None:
+        result_holder.append(auth.perform_login(session, timeout))
+        done.set()
+
+    t = threading.Thread(target=_do_login, daemon=True)
+    t.start()
+    chars = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+    i = 0
+    while not done.is_set():
+        sys.stderr.write(f"\r  {chars[i % len(chars)]} Logging in...")
+        sys.stderr.flush()
+        time.sleep(0.1)
+        i += 1
+    sys.stderr.write("\r" + " " * 30 + "\r")
+    sys.stderr.flush()
+    t.join()
+    return result_holder[0] if result_holder else False
+
+
 def _on_exit(settings: Optional[Settings]) -> None:
     def _cleanup() -> None:
         _SHUTDOWN.set()
@@ -86,43 +111,43 @@ def _parse_args() -> dict[str, object]:
             try:
                 args["interval"] = int(argv[i + 1])
             except ValueError:
-                pass
+                print(f"  {red('[WARN]')} Invalid value for --interval: {argv[i+1]}")
             i += 2
         elif a == "--balance-below" and i + 1 < len(argv):
             try:
                 args["balance_below"] = float(argv[i + 1])
             except ValueError:
-                pass
+                print(f"  {red('[WARN]')} Invalid value for --balance-below: {argv[i+1]}")
             i += 2
         elif a == "--margin-below" and i + 1 < len(argv):
             try:
                 args["margin_below"] = float(argv[i + 1])
             except ValueError:
-                pass
+                print(f"  {red('[WARN]')} Invalid value for --margin-below: {argv[i+1]}")
             i += 2
         elif a == "--billed-above" and i + 1 < len(argv):
             try:
                 args["billed_above"] = float(argv[i + 1])
             except ValueError:
-                pass
+                print(f"  {red('[WARN]')} Invalid value for --billed-above: {argv[i+1]}")
             i += 2
         elif a == "--margin-above" and i + 1 < len(argv):
             try:
                 args["margin_above"] = float(argv[i + 1])
             except ValueError:
-                pass
+                print(f"  {red('[WARN]')} Invalid value for --margin-above: {argv[i+1]}")
             i += 2
         elif a == "--margin-deadband" and i + 1 < len(argv):
             try:
                 args["margin_deadband"] = float(argv[i + 1])
             except ValueError:
-                pass
+                print(f"  {red('[WARN]')} Invalid value for --margin-deadband: {argv[i+1]}")
             i += 2
         elif a == "--cooldown" and i + 1 < len(argv):
             try:
                 args["cooldown"] = int(argv[i + 1])
             except ValueError:
-                pass
+                print(f"  {red('[WARN]')} Invalid value for --cooldown: {argv[i+1]}")
             i += 2
         elif a == "--quiet":
             args["quiet"] = True
@@ -142,6 +167,15 @@ def _parse_args() -> dict[str, object]:
         elif a == "--help":
             args["help"] = True
             i += 1
+        elif a == "--status":
+            args["status"] = True
+            i += 1
+        elif a == "--tail" and i + 1 < len(argv):
+            try:
+                args["tail"] = int(argv[i + 1])
+            except ValueError:
+                args["tail"] = 20
+            i += 2
         else:
             i += 1
     return args
@@ -165,6 +199,8 @@ def _print_help() -> None:
     print("  --export             Export balance + margin CSV and exit")
     print("  --export-customer ID Export for specific customer only")
     print("  --no-hot-reload      Disable settings hot-reload")
+    print("  --status             Show monitor health status and exit")
+    print("  --tail N             Show last N log entries and exit (default: 20)")
     print("  --help               Show this help")
     print()
     print("Settings in settings.toml  |  Credentials in .env")
@@ -199,6 +235,7 @@ def _qprint(settings: Settings, *a, **kw) -> None:
 
 
 def _sleep_interruptible(seconds: int) -> bool:
+    seconds = max(seconds, 1)
     for _ in range(seconds):
         if _SHUTDOWN.is_set():
             return True
@@ -237,10 +274,49 @@ def _run_export(settings: Settings, args: dict[str, object]) -> None:
     print(f"  {green('Exported:')} {m_file}")
 
 
+def _run_status() -> None:
+    if not os.path.exists(_STATUS_FILE):
+        print(f"  {dim('No monitor.status file found — monitor may not be running.')}")
+        return
+    with open(_STATUS_FILE) as f:
+        status = json.load(f)
+    alive = green("YES") if status.get("alive") else red("NO")
+    print()
+    print(f"  {bold('Monitor Status')}")
+    print(f"  {dim('─' * 40)}")
+    print(f"  Alive:           {alive}")
+    print(f"  Uptime:          {status.get('uptime_seconds', 0):.0f}s")
+    print(f"  Cycles:          {status.get('cycle_count', 0)}")
+    print(f"  Errors:          {status.get('error_count', 0)}")
+    print(f"  Last Check:      {status.get('last_check', 'N/A')}")
+    print(f"  Last Error:      {status.get('last_error', 'None')}")
+    print(f"  Customers:       {status.get('customers_monitored', 0)}")
+    print(f"  Settings v:      {status.get('settings_version', 0)}")
+    print()
+
+
+def _run_tail(lines: int) -> None:
+    if not os.path.exists(_LOG_FILE):
+        print(f"  {dim('No log file found — monitor may not have been started.')}")
+        return
+    max_bytes = lines * 500
+    file_size = os.path.getsize(_LOG_FILE)
+    with open(_LOG_FILE, "rb") as f:
+        if file_size > max_bytes:
+            f.seek(-max_bytes, os.SEEK_END)
+        content = f.read().decode(errors="replace")
+    tail_lines = content.splitlines()[-lines:]
+    print(f"  {bold('Last')} {len(tail_lines)} {bold('log entries:')}")
+    print(f"  {dim('─' * 60)}")
+    for line in tail_lines:
+        print(f"  {dim(line)}")
+    print()
+
+
 def _run_once(settings: Settings) -> None:
     g = settings.global_
     session = auth.create_session()
-    if not auth.perform_login(session, g.request_timeout):
+    if not _login_with_spinner(session, g.request_timeout):
         print("  Login failed.")
         session.close()
         return
@@ -367,6 +443,28 @@ def _try_hot_reload(current: Settings, args: dict[str, object]) -> Settings:
     return new_settings
 
 
+def _print_session_summary() -> None:
+    uptime = time.time() - _START_TIME if _START_TIME else 0.0
+    hours = int(uptime // 3600)
+    minutes = int((uptime % 3600) // 60)
+    seconds = int(uptime % 60)
+    uptime_str = f"{hours}h {minutes}m {seconds}s" if hours else f"{minutes}m {seconds}s" if minutes else f"{seconds}s"
+    alerts = get_session_alert_count()
+    errors = _ERROR_COUNT
+    error_str = red(f"{errors}") if errors else green("0")
+    alert_str = red(f"{alerts}") if alerts else green("0")
+    print()
+    print(f"  {bold('Session Summary')}")
+    print(f"  {dim('─' * 40)}")
+    print(f"  Uptime:       {uptime_str}")
+    print(f"  Cycles:       {_CYCLE_COUNT}")
+    print(f"  Alerts:       {alert_str}")
+    print(f"  Errors:       {error_str}")
+    if _LAST_ERROR:
+        print(f"  Last Error:   {dim(_LAST_ERROR)}")
+    print()
+
+
 def _monitor_loop(settings: Settings) -> None:
     global _CYCLE_COUNT, _ERROR_COUNT, _LAST_ERROR, _LAST_CHECK
 
@@ -378,7 +476,7 @@ def _monitor_loop(settings: Settings) -> None:
     args = {"no_hot_reload": getattr(g, "_no_hot_reload", False)}
 
     session = auth.create_session()
-    if not auth.perform_login(session, g.request_timeout):
+    if not _login_with_spinner(session, g.request_timeout):
         print("  Login failed. Exiting.")
         session.close()
         return
@@ -544,6 +642,7 @@ def _monitor_loop(settings: Settings) -> None:
         _SHUTDOWN.set()
         _write_health_status(settings)
         session.close()
+        _print_session_summary()
 
 
 def main() -> None:
@@ -556,23 +655,47 @@ def main() -> None:
         _print_help()
         sys.exit(0)
 
+    if args.get("status"):
+        _run_status()
+        sys.exit(0)
+
+    if args.get("tail"):
+        _run_tail(int(args["tail"]))
+        sys.exit(0)
+
     settings = load_settings()
     settings = _apply_cli_overrides(settings, args)
 
     if args.get("no_hot_reload"):
         settings.global_._no_hot_reload = True
 
+    _settings_file_existed = os.path.exists(SETTINGS_FILE)
+
+    settings = load_settings()
+    settings = _apply_cli_overrides(settings, args)
+
+    if args.get("no_hot_reload"):
+        settings.global_._no_hot_reload = True
+
+    if not _settings_file_existed:
+        print(f"  {green('[INFO]')} Created {bold('settings.toml')} — edit it to configure monitored customers.")
+        print(f"  {dim('    If this is your first run, also create a .env file.')}")
+        print(f"  {dim('    See .env.example for the required fields.')}")
+        print()
+
     errors = validate_settings(settings)
     if errors:
-        print("Invalid settings:")
+        print(f"  {red('[ERROR]')} Invalid settings {'(see settings.toml)' if _settings_file_existed else ''}:")
         for e in errors:
-            print(f"  - {e}")
+            print(f"    - {e}")
+        print()
         sys.exit(1)
 
     try:
         get_credentials()
     except ValueError as e:
-        print(f"Credential error: {e}")
+        print(f"  {red('[ERROR]')} {e}")
+        print(f"  {dim('Create a .env file with PORTAL_USERNAME and PORTAL_PASSWORD, or copy .env.example.')}")
         sys.exit(1)
 
     init_db()
