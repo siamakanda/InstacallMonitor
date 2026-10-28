@@ -25,8 +25,8 @@ class CircuitBreaker:
         self._lock = threading.Lock()
         self._state = CircuitState.CLOSED
         self._failure_count = 0
-        self._last_failure_time = 0.0
         self._opened_at = 0.0
+        self._half_open_at = 0.0
 
     @property
     def state(self) -> CircuitState:
@@ -35,7 +35,9 @@ class CircuitBreaker:
 
     @property
     def is_open(self) -> bool:
-        return self.state == CircuitState.OPEN
+        # True whenever requests are being blocked (OPEN or awaiting a probe).
+        with self._lock:
+            return self._state in (CircuitState.OPEN, CircuitState.HALF_OPEN)
 
     @property
     def failure_count(self) -> int:
@@ -44,12 +46,20 @@ class CircuitBreaker:
 
     def before_request(self) -> bool:
         with self._lock:
+            now = time.monotonic()
             if self._state == CircuitState.OPEN:
-                if time.time() - self._opened_at >= self.recovery_timeout:
+                if now - self._opened_at >= self.recovery_timeout:
                     self._state = CircuitState.HALF_OPEN
+                    self._half_open_at = now
                     return True
                 return False
             if self._state == CircuitState.HALF_OPEN:
+                # Allow a fresh probe only if the previous probe never reported an
+                # outcome (a caller returned true without calling on_success/on_failure).
+                # This prevents the breaker latching permanently in HALF_OPEN.
+                if now - self._half_open_at >= self.recovery_timeout:
+                    self._half_open_at = now
+                    return True
                 return False
             return True
 
@@ -61,17 +71,16 @@ class CircuitBreaker:
     def on_failure(self) -> None:
         with self._lock:
             self._failure_count += 1
-            self._last_failure_time = time.time()
             if self._failure_count >= self.failure_threshold:
                 self._state = CircuitState.OPEN
-                self._opened_at = time.time()
+                self._opened_at = time.monotonic()
 
     def reset(self) -> None:
         with self._lock:
             self._state = CircuitState.CLOSED
             self._failure_count = 0
-            self._last_failure_time = 0.0
             self._opened_at = 0.0
+            self._half_open_at = 0.0
 
     def status(self) -> dict[str, object]:
         with self._lock:

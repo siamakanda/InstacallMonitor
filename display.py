@@ -5,18 +5,39 @@ import re
 import sys
 from typing import Optional
 
-if sys.platform == "win32":
-    os.system("")
-
 _ANSI_RE = re.compile(r"\033\[[0-9;]*m")
 
+# Colour output only when writing to a terminal (override with set_colors_enabled).
+COLORS_ENABLED: bool = sys.stdout.isatty()
 
-def _visible_len(text: str) -> int:
-    return len(_ANSI_RE.sub("", text))
+
+def _configure_stdio() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
+def init() -> None:
+    """Configure UTF-8 stdio and enable ANSI on Windows. Call once at startup."""
+    _configure_stdio()
+    if sys.platform == "win32":
+        os.system("")
+
+
+def set_colors_enabled(enabled: bool) -> None:
+    global COLORS_ENABLED
+    COLORS_ENABLED = enabled
 
 
 def _color(code: int, text: str) -> str:
     clean = _ANSI_RE.sub("", text)
+    if not COLORS_ENABLED:
+        return clean
     return f"\033[{code}m{clean}\033[0m"
 
 

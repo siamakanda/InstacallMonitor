@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import csv
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional
+from typing import Iterator, Optional
 
 import config
 
@@ -64,18 +65,27 @@ CREATE TABLE IF NOT EXISTS alert_state (
     state INTEGER NOT NULL DEFAULT 0,
     alert_count INTEGER NOT NULL DEFAULT 0,
     last_alerted_at TEXT,
+    direction TEXT,
     PRIMARY KEY (customer_id, alert_type)
 );
 
 CREATE INDEX IF NOT EXISTS idx_balance_customer ON balance_history(customer_id, recorded_at);
 CREATE INDEX IF NOT EXISTS idx_margin_customer ON margin_history(customer_id, recorded_at);
+CREATE INDEX IF NOT EXISTS idx_balance_recorded ON balance_history(recorded_at);
+CREATE INDEX IF NOT EXISTS idx_margin_recorded ON margin_history(recorded_at);
 """
 
 
-def _get_connection() -> sqlite3.Connection:
+@contextmanager
+def _get_connection() -> Iterator[sqlite3.Connection]:
     conn = sqlite3.connect(config.DB_FILE)
     conn.execute("PRAGMA journal_mode=WAL")
-    return conn
+    conn.execute("PRAGMA busy_timeout=5000")
+    try:
+        yield conn
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def init_db() -> None:
@@ -87,8 +97,9 @@ def init_db() -> None:
         ):
             try:
                 conn.execute(migration)
-            except sqlite3.OperationalError:
-                pass
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
 
 
 def insert_balance(record: BalanceRecord) -> None:
@@ -111,46 +122,39 @@ def insert_margin(record: MarginRecord) -> None:
         conn.commit()
 
 
+_BALANCE_COLS = ("id", "customer_id", "customer_name", "balance", "credit_limit", "remaining", "recorded_at")
+_MARGIN_COLS = ("id", "customer_id", "customer_name", "margin", "billed_min", "recorded_at")
+
+
+def _history(
+    table: str, cols: tuple[str, ...], customer_id: Optional[str], hours: int, limit: int
+) -> list[dict[str, object]]:
+    select = ", ".join(cols)
+    with _get_connection() as conn:
+        if customer_id:
+            rows = conn.execute(
+                f"SELECT {select} FROM {table} WHERE customer_id = ? "
+                "AND recorded_at > datetime('now', 'localtime', ?) "
+                "ORDER BY recorded_at DESC LIMIT ?",
+                (customer_id, f"-{hours} hours", limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                f"SELECT {select} FROM {table} WHERE recorded_at > datetime('now', 'localtime', ?) "
+                "ORDER BY recorded_at DESC LIMIT ?",
+                (f"-{hours} hours", limit),
+            ).fetchall()
+    return [dict(zip(cols, row)) for row in rows]
+
+
 def get_balance_history(
     customer_id: Optional[str] = None, hours: int = 24, limit: int = 500
 ) -> list[dict[str, object]]:
-    cutoff = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with _get_connection() as conn:
-        if customer_id:
-            rows = conn.execute(
-                "SELECT * FROM balance_history WHERE customer_id = ? AND recorded_at > datetime(?, 'localtime', ?) "
-                "ORDER BY recorded_at DESC LIMIT ?",
-                (customer_id, cutoff, f"-{hours} hours", limit),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT * FROM balance_history WHERE recorded_at > datetime(?, 'localtime', ?) "
-                "ORDER BY recorded_at DESC LIMIT ?",
-                (cutoff, f"-{hours} hours", limit),
-            ).fetchall()
-    cols = ["id", "customer_id", "customer_name", "balance", "credit_limit", "remaining", "recorded_at"]
-    return [dict(zip(cols, row)) for row in rows]
+    return _history("balance_history", _BALANCE_COLS, customer_id, hours, limit)
 
 
-def get_margin_history(
-    customer_id: Optional[str] = None, hours: int = 24, limit: int = 500
-) -> list[dict[str, object]]:
-    cutoff = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with _get_connection() as conn:
-        if customer_id:
-            rows = conn.execute(
-                "SELECT * FROM margin_history WHERE customer_id = ? AND recorded_at > datetime(?, 'localtime', ?) "
-                "ORDER BY recorded_at DESC LIMIT ?",
-                (customer_id, cutoff, f"-{hours} hours", limit),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT * FROM margin_history WHERE recorded_at > datetime(?, 'localtime', ?) "
-                "ORDER BY recorded_at DESC LIMIT ?",
-                (cutoff, f"-{hours} hours", limit),
-            ).fetchall()
-    cols = ["id", "customer_id", "customer_name", "margin", "billed_min", "recorded_at"]
-    return [dict(zip(cols, row)) for row in rows]
+def get_margin_history(customer_id: Optional[str] = None, hours: int = 24, limit: int = 500) -> list[dict[str, object]]:
+    return _history("margin_history", _MARGIN_COLS, customer_id, hours, limit)
 
 
 def purge_old_records(retention_days: int) -> int:
@@ -190,27 +194,32 @@ def set_alert_state(customer_id: str, alert_type: str, state: int, count: int = 
         conn.commit()
 
 
-def export_balance_csv(filename: Optional[str] = None, customer_id: Optional[str] = None, hours: int = 168) -> str:
+def get_alert_states() -> list[dict[str, object]]:
+    with _get_connection() as conn:
+        rows = conn.execute(
+            "SELECT customer_id, alert_type, state, alert_count, last_alerted_at, coalesce(direction, '') "
+            "FROM alert_state ORDER BY customer_id, alert_type"
+        ).fetchall()
+    cols = ["customer_id", "alert_type", "state", "alert_count", "last_alerted_at", "direction"]
+    return [dict(zip(cols, row)) for row in rows]
+
+
+def _write_csv(filename: Optional[str], prefix: str, fieldnames: list[str], rows: list[dict[str, object]]) -> str:
     if filename is None:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"balance_export_{ts}.csv"
-    rows = get_balance_history(customer_id=customer_id, hours=hours, limit=50000)
+        filename = f"{prefix}_export_{ts}.csv"
     with open(filename, "w", newline="") as f:
-        if rows:
-            writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-            writer.writeheader()
-            writer.writerows(rows)
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
     return filename
+
+
+def export_balance_csv(filename: Optional[str] = None, customer_id: Optional[str] = None, hours: int = 168) -> str:
+    rows = get_balance_history(customer_id=customer_id, hours=hours, limit=50000)
+    return _write_csv(filename, "balance", list(_BALANCE_COLS), rows)
 
 
 def export_margin_csv(filename: Optional[str] = None, customer_id: Optional[str] = None, hours: int = 168) -> str:
-    if filename is None:
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"margin_export_{ts}.csv"
     rows = get_margin_history(customer_id=customer_id, hours=hours, limit=50000)
-    with open(filename, "w", newline="") as f:
-        if rows:
-            writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-            writer.writeheader()
-            writer.writerows(rows)
-    return filename
+    return _write_csv(filename, "margin", list(_MARGIN_COLS), rows)

@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+import pytest
 
-from config import GlobalSettings, Settings, WatchTarget, validate_settings
+import config
+from config import GlobalSettings, Settings, WatchTarget, read_settings, save_settings, validate_settings
 
 
 class TestGlobalSettings:
@@ -29,6 +29,12 @@ class TestGlobalSettings:
     def test_from_dict_ignores_unknown(self) -> None:
         g = GlobalSettings.from_dict({"check_interval": 60, "unknown_field": "ignored"})
         assert g.check_interval == 60
+
+    def test_from_dict_coerces_string_values(self) -> None:
+        g = GlobalSettings.from_dict({"check_interval": "120", "audio": "false", "margin_below": "25.5"})
+        assert g.check_interval == 120
+        assert g.audio is False
+        assert g.margin_below == 25.5
 
 
 class TestWatchTarget:
@@ -148,3 +154,190 @@ class TestSettings:
         s = Settings(global_=g, watch=[WatchTarget(customer="1", balance_below=-365.0)])
         errors = validate_settings(s)
         assert any("margin_deadband" in e for e in errors)
+
+    def test_web_dashboard_defaults(self) -> None:
+        g = GlobalSettings()
+        assert g.web_dashboard is True
+        assert g.web_dashboard_host == "127.0.0.1"
+        assert g.web_dashboard_port == 8765
+        assert g.web_dashboard_refresh == 5
+
+    def test_validate_bad_web_port(self) -> None:
+        g = GlobalSettings(web_dashboard_port=70000)
+        s = Settings(global_=g, watch=[WatchTarget(customer="1", balance_below=-365.0)])
+        errors = validate_settings(s)
+        assert any("web_dashboard_port" in e for e in errors)
+
+    def test_validate_zero_web_refresh(self) -> None:
+        g = GlobalSettings(web_dashboard_refresh=0)
+        s = Settings(global_=g, watch=[WatchTarget(customer="1", balance_below=-365.0)])
+        errors = validate_settings(s)
+        assert any("web_dashboard_refresh" in e for e in errors)
+
+    def test_validate_customer_margin_inverted(self) -> None:
+        s = Settings(watch=[WatchTarget(customer="7", balance_below=-1.0, margin_below=80.0, margin_above=70.0)])
+        errors = validate_settings(s)
+        assert any("customer '7'" in e for e in errors)
+
+    def test_validate_customer_deadband_too_large(self) -> None:
+        s = Settings(watch=[WatchTarget(customer="7", balance_below=-1.0, margin_deadband=30.0)])
+        errors = validate_settings(s)
+        assert any("customer '7'" in e for e in errors)
+
+    def test_validate_customer_overrides_valid(self) -> None:
+        s = Settings(
+            watch=[
+                WatchTarget(
+                    customer="7",
+                    balance_below=-1.0,
+                    margin_below=25.0,
+                    margin_above=70.0,
+                    margin_deadband=2.0,
+                )
+            ]
+        )
+        assert validate_settings(s) == []
+
+
+class TestSettingsFilePersistence:
+    def _isolate(self, tmp_path: Path, monkeypatch) -> Path:
+        path = tmp_path / "settings.toml"
+        monkeypatch.setattr(config, "SETTINGS_FILE", str(path))
+        monkeypatch.setattr(config, "_BASE_DIR", tmp_path)
+        return path
+
+    def test_read_settings_has_no_side_effects(self, tmp_path: Path, monkeypatch) -> None:
+        path = self._isolate(tmp_path, monkeypatch)
+        path.write_text(
+            '[settings]\ncheck_interval = 42\n[[watch]]\ncustomer = "18"\nbalance_below = -500.0\n',
+            encoding="utf-8",
+        )
+        before_mtime = config._settings_mtime
+        before_version = config._settings_version
+
+        settings = read_settings()
+
+        assert settings.global_.check_interval == 42
+        assert config._settings_mtime == before_mtime
+        assert config._settings_version == before_version
+
+    def test_save_settings_backs_up_and_keeps_comments(self, tmp_path: Path, monkeypatch) -> None:
+        path = self._isolate(tmp_path, monkeypatch)
+        original = (
+            '# my custom comment\n[settings]\ncheck_interval = 60\n[[watch]]\ncustomer = "18"\nbalance_below = -500.0\n'
+        )
+        path.write_text(original, encoding="utf-8")
+
+        save_settings(
+            Settings(
+                global_=GlobalSettings(check_interval=120, margin_below=25.0),
+                watch=[WatchTarget(customer="18", balance_below=-600.0)],
+            )
+        )
+
+        backup = Path(str(path) + ".bak")
+        assert backup.exists()
+        assert backup.read_text(encoding="utf-8") == original
+
+        content = path.read_text(encoding="utf-8")
+        assert "# Interval between check cycles, in seconds" in content
+        assert "# Margin below this percentage triggers low-margin alert" in content
+
+        reloaded = read_settings()
+        assert reloaded.global_.check_interval == 120
+        assert reloaded.global_.margin_below == 25.0
+        assert reloaded.get_watch("18").balance_below == -600.0
+
+    def test_malformed_number_reports_error_not_crash(self, tmp_path: Path, monkeypatch) -> None:
+        path = self._isolate(tmp_path, monkeypatch)
+        path.write_text(
+            '[settings]\ncheck_interval = "abc"\n[[watch]]\ncustomer = "18"\nbalance_below = -500.0\n',
+            encoding="utf-8",
+        )
+        settings = read_settings()
+        errors = validate_settings(settings)
+        assert any("check_interval" in e for e in errors)
+
+    def test_malformed_watch_override_reports_error(self, tmp_path: Path, monkeypatch) -> None:
+        path = self._isolate(tmp_path, monkeypatch)
+        path.write_text(
+            '[settings]\n[[watch]]\ncustomer = "18"\nbalance_below = "oops"\n',
+            encoding="utf-8",
+        )
+        settings = read_settings()
+        errors = validate_settings(settings)
+        assert any("balance_below" in e for e in errors)
+
+    def test_load_settings_raises_on_corrupt_file(self, tmp_path: Path, monkeypatch) -> None:
+        path = self._isolate(tmp_path, monkeypatch)
+        path.write_text("this is not = valid toml [[[", encoding="utf-8")
+        with pytest.raises(config.SettingsError):
+            config.load_settings()
+
+    def test_load_settings_creates_template_when_missing(self, tmp_path: Path, monkeypatch) -> None:
+        path = self._isolate(tmp_path, monkeypatch)
+        assert not path.exists()
+        settings = config.load_settings()
+        assert path.exists()
+        assert settings.customer_ids == ["18"]
+
+    def test_empty_watch_is_not_silently_defaulted(self, tmp_path: Path, monkeypatch) -> None:
+        path = self._isolate(tmp_path, monkeypatch)
+        path.write_text("[settings]\ncheck_interval = 60\n", encoding="utf-8")
+        settings = read_settings()
+        assert settings.customer_ids == []
+        assert any("watch" in e.lower() for e in validate_settings(settings))
+
+    def test_save_settings_escapes_special_characters(self, tmp_path: Path, monkeypatch) -> None:
+        self._isolate(tmp_path, monkeypatch)
+        nasty_host = '127.0.0.1"\nfoo = "bar'
+        nasty_name = 'ACME "Corp"\n[[watch]]'
+
+        save_settings(
+            Settings(
+                global_=GlobalSettings(web_dashboard_host=nasty_host),
+                watch=[WatchTarget(customer="18", name=nasty_name, balance_below=-500.0)],
+            )
+        )
+
+        reloaded = read_settings()
+        assert reloaded.global_.web_dashboard_host == nasty_host
+        assert reloaded.get_watch("18").name == nasty_name
+
+
+class TestValidateHardening:
+    def _settings(self, **gkw):
+        return Settings(global_=GlobalSettings(**gkw), watch=[WatchTarget(customer="18", balance_below=-500.0)])
+
+    def test_duplicate_customer_ids_rejected(self) -> None:
+        s = Settings(
+            watch=[
+                WatchTarget(customer="18", balance_below=-500.0),
+                WatchTarget(customer="18", balance_below=-200.0),
+            ]
+        )
+        assert any("duplicate customer" in e for e in validate_settings(s))
+
+    def test_bad_summary_interval_rejected(self) -> None:
+        errors = validate_settings(self._settings(summary_interval="5 minutes"))
+        assert any("summary_interval" in e for e in errors)
+
+    def test_nan_margin_rejected(self) -> None:
+        errors = validate_settings(self._settings(margin_below=float("nan")))
+        assert any("margin" in e for e in errors)
+
+    def test_inf_interval_rejected(self) -> None:
+        errors = validate_settings(self._settings(check_interval=float("inf")))
+        assert any("check_interval" in e for e in errors)
+
+    def test_host_with_control_chars_rejected(self) -> None:
+        errors = validate_settings(self._settings(web_dashboard_host="127.0.0.1\n"))
+        assert any("web_dashboard_host" in e for e in errors)
+
+    def test_negative_retry_base_delay_rejected(self) -> None:
+        errors = validate_settings(self._settings(retry_base_delay=-1.0))
+        assert any("retry_base_delay" in e for e in errors)
+
+    def test_interval_upper_bound_enforced(self) -> None:
+        errors = validate_settings(self._settings(check_interval=10**9))
+        assert any("check_interval" in e for e in errors)

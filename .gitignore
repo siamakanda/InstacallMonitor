@@ -17,6 +17,18 @@ __pycache__/
 *.pyd
 .pytest_cache/
 .mypy_cache/
+.ruff_cache/
+
+# Test coverage
+.coverage
+coverage.xml
+htmlcov/
+
+# Python build artifacts (pip install . / -e .)
+build/
+dist/
+*.egg-info/
+*.egg
 
 # Operating System Files
 Thumbs.db
@@ -57,3 +69,4 @@ docker-compose.override.yml
 # Runtime artifacts
 output.txt
 settings.toml
+settings.toml.bak

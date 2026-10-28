@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-import sys
-from pathlib import Path
+import pytest
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
+import display
 from display import dim, green, magenta, red, yellow
+
+
+@pytest.fixture(autouse=True)
+def _enable_colors(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(display, "COLORS_ENABLED", True)
 
 
 class TestDisplay:
@@ -23,3 +26,7 @@ class TestDisplay:
 
     def test_dim(self) -> None:
         assert "\033[2m" in dim("test")
+
+    def test_colors_disabled_strips_codes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(display, "COLORS_ENABLED", False)
+        assert red("test") == "test"

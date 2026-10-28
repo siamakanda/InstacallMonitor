@@ -1,10 +1,6 @@
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from unittest.mock import MagicMock
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config import Settings, WatchTarget
 from scrapers import fetch_balance, fetch_summary_report, parse_summary_page
@@ -147,6 +143,18 @@ class TestScrapers:
         s = Settings(watch=[WatchTarget(customer="18", balance_below=-365.0)])
         results, error = fetch_summary_report(session, s)
         assert error is not None
+
+    def test_fetch_summary_empty_table_is_success(self) -> None:
+        mock_resp = MagicMock()
+        mock_resp.url = "https://example.com/summary_report"
+        mock_resp.status_code = 200
+        mock_resp.text = '<html><body><div id="panel-cust"><table><tbody></tbody></table></div></body></html>'
+
+        session = _make_session(mock_resp)
+        s = Settings(watch=[WatchTarget(customer="18", balance_below=-365.0)])
+        results, error = fetch_summary_report(session, s)
+        assert error is None
+        assert results == {}
 
     def test_parse_summary_with_thead(self) -> None:
         results = parse_summary_page(SUMMARY_HTML)

@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 from circuit_breaker import CircuitBreaker, CircuitState
 
 
+@pytest.mark.slow
 class TestCircuitBreaker:
     def test_initial_state_is_closed(self) -> None:
         cb = CircuitBreaker(name="test")
@@ -103,3 +106,22 @@ class TestCircuitBreaker:
         assert status["state"] == "closed"
         assert status["failure_count"] == 0
         assert status["opened_at"] is None
+
+    def test_is_open_true_while_half_open(self) -> None:
+        cb = CircuitBreaker(name="test", failure_threshold=2, recovery_timeout=0.01)
+        cb.on_failure()
+        cb.on_failure()
+        time.sleep(0.02)
+        assert cb.before_request() is True
+        assert cb.state == CircuitState.HALF_OPEN
+        assert cb.is_open
+
+    def test_half_open_self_heals_when_probe_reports_no_outcome(self) -> None:
+        cb = CircuitBreaker(name="test", failure_threshold=2, recovery_timeout=0.01)
+        cb.on_failure()
+        cb.on_failure()
+        time.sleep(0.02)
+        assert cb.before_request() is True  # probe... caller returns without an outcome
+        assert cb.state == CircuitState.HALF_OPEN
+        time.sleep(0.02)
+        assert cb.before_request() is True  # not latched: a fresh probe is allowed

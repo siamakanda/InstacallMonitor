@@ -2,14 +2,53 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import tempfile
-from dataclasses import dataclass, field, fields
+import threading
+from dataclasses import fields
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any, Optional
 
 import tomli as tomllib
-from dotenv import load_dotenv
+
+from credentials import get_credentials
+from settings_models import (
+    DEFAULT_BALANCE_BELOW,
+    GlobalSettings,
+    Settings,
+    WatchTarget,
+    fmt_val,
+)
+from settings_validation import validate_settings
+
+__all__ = [
+    "BASE_EDIT_URL",
+    "DB_FILE",
+    "DEFAULT_BALANCE_BELOW",
+    "GlobalSettings",
+    "HEADERS",
+    "LOGIN_URL",
+    "LOG_FILE",
+    "SETTINGS_FILE",
+    "SUMMARY_REPORT_URL",
+    "Settings",
+    "SettingsError",
+    "WatchTarget",
+    "get_credentials",
+    "get_settings_mtime",
+    "get_settings_version",
+    "load_settings",
+    "read_settings",
+    "reload_settings",
+    "save_settings",
+    "setup_logging",
+    "validate_settings",
+]
+
+
+class SettingsError(Exception):
+    """Raised when settings.toml exists but cannot be parsed."""
+
 
 LOGIN_URL = "https://switchportal.instacall.digital/login"
 BASE_EDIT_URL = "https://switchportal.instacall.digital/customers?edit="
@@ -29,159 +68,6 @@ _BASE_DIR = Path(__file__).resolve().parent
 LOG_FILE = str(_BASE_DIR / "balance_monitor.log")
 SETTINGS_FILE = str(_BASE_DIR / "settings.toml")
 DB_FILE = str(_BASE_DIR / "instacallmonitor.db")
-
-DEFAULT_BALANCE_BELOW = -500.0
-
-
-def _coerce(value: Any, target: Any) -> Any:
-    if value is None:
-        return None
-    origin = getattr(target, "__origin__", None)
-    if origin is not None:
-        args = getattr(target, "__args__", ())
-        for arg in args:
-            if arg is not type(None):
-                target = arg
-                break
-    if target is bool and not isinstance(value, bool):
-        if isinstance(value, str):
-            return value.strip().lower() in ("true", "1", "yes", "on")
-        return bool(value)
-    if target is int and not isinstance(value, int):
-        try:
-            return int(value)
-        except (ValueError, TypeError):
-            return value
-    if target is float and not isinstance(value, float):
-        try:
-            return float(value)
-        except (ValueError, TypeError):
-            return value
-    return value
-
-
-@dataclass
-class GlobalSettings:
-    check_interval: int = 600
-    request_timeout: int = 10
-    audio: bool = True
-    cooldown: int = 300
-    db_retention_days: int = 30
-    summary_direction: str = "outbound"
-    summary_interval: str = "5m"
-    margin_below: float = 30.0
-    margin_above: float = 75.0
-    margin_deadband: float = 3.0
-    billed_above: float = 70.0
-    siren_loops: int = 10
-    siren_min_freq: int = 2200
-    siren_max_freq: int = 3500
-    siren_step_freq: int = 130
-    siren_tone_duration: int = 50
-    max_workers: int = 4
-    retry_max_attempts: int = 3
-    retry_base_delay: float = 1.0
-    retry_max_delay: float = 30.0
-    retry_jitter_max: float = 1.0
-    circuit_failure_threshold: int = 5
-    circuit_recovery_timeout: float = 60.0
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> GlobalSettings:
-        field_names = {f.name for f in fields(cls)}
-        field_types = {f.name: f.type for f in fields(cls)}
-        filtered: dict[str, Any] = {}
-        for k, v in data.items():
-            if k in field_names:
-                filtered[k] = _coerce(v, field_types.get(k))
-        return cls(**filtered)
-
-
-@dataclass
-class WatchTarget:
-    customer: str
-    name: str = ""
-    balance_below: Optional[float] = None
-    margin_below: Optional[float] = None
-    margin_above: Optional[float] = None
-    margin_deadband: Optional[float] = None
-    billed_above: Optional[float] = None
-
-    def resolve_balance_below(self) -> float:
-        return self.balance_below if self.balance_below is not None else DEFAULT_BALANCE_BELOW
-
-    def resolve_margin_below(self, default: float) -> float:
-        return self.margin_below if self.margin_below is not None else default
-
-    def resolve_margin_above(self, default: float) -> float:
-        return self.margin_above if self.margin_above is not None else default
-
-    def resolve_margin_deadband(self, default: float) -> float:
-        return self.margin_deadband if self.margin_deadband is not None else default
-
-    def resolve_billed_above(self, default: float) -> float:
-        return self.billed_above if self.billed_above is not None else default
-
-    def to_dict(self) -> dict[str, Any]:
-        result: dict[str, Any] = {"customer": self.customer}
-        if self.name:
-            result["name"] = self.name
-        for fname in ("balance_below", "margin_below", "margin_above", "margin_deadband", "billed_above"):
-            val = getattr(self, fname)
-            if val is not None:
-                result[fname] = val
-        return result
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> WatchTarget:
-        return cls(
-            customer=str(data.get("customer", "")),
-            name=str(data.get("name", "")),
-            balance_below=_coerce(data.get("balance_below"), Optional[float]),
-            margin_below=_coerce(data.get("margin_below"), Optional[float]),
-            margin_above=_coerce(data.get("margin_above"), Optional[float]),
-            margin_deadband=_coerce(data.get("margin_deadband"), Optional[float]),
-            billed_above=_coerce(data.get("billed_above"), Optional[float]),
-        )
-
-
-@dataclass
-class Settings:
-    global_: GlobalSettings = field(default_factory=GlobalSettings)
-    watch: list[WatchTarget] = field(default_factory=list)
-
-    @property
-    def customer_ids(self) -> list[str]:
-        return sorted(w.customer for w in self.watch) if self.watch else []
-
-    def get_watch(self, customer_id: str) -> WatchTarget:
-        for w in self.watch:
-            if w.customer == customer_id:
-                return w
-        return WatchTarget(customer=customer_id)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "settings": {f.name: getattr(self.global_, f.name) for f in fields(GlobalSettings)},
-            "watch": [w.to_dict() for w in self.watch],
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> Settings:
-        global_data = data.get("settings", {})
-        watch_data = data.get("watch", [])
-        gs = GlobalSettings.from_dict(global_data)
-        targets = [WatchTarget.from_dict(w) for w in watch_data]
-        return cls(global_=gs, watch=targets)
-
-
-def _fmt_val(val: Any) -> str:
-    if val is None:
-        return "0.0"
-    if isinstance(val, float) and val == int(val):
-        return str(int(val))
-    return str(val)
-
 
 _SETTINGS_TEMPLATE = """\
 # InstacallMonitor Settings
@@ -227,6 +113,11 @@ retry_jitter_max = 1.0
 # Circuit breaker — opens after N consecutive failures, recovers after timeout
 circuit_failure_threshold = 5
 circuit_recovery_timeout = 60.0
+# Web dashboard — local HTTP UI for live balances, margins and history
+web_dashboard = true
+web_dashboard_host = "127.0.0.1"
+web_dashboard_port = 8765
+web_dashboard_refresh = 5
 
 # Add one [[watch]] block for each customer to monitor.
 # The "customer" field is the numeric customer ID from the Instacall portal.
@@ -237,7 +128,39 @@ customer = "18"
 name = ""
 balance_below = -500.0
 """
+_settings_mtime: float = 0.0
 _settings_version: int = 0
+_settings_lock = threading.Lock()
+
+
+def _extract_global_comments() -> dict[str, str]:
+    comments: dict[str, str] = {}
+    pending: list[str] = []
+    in_settings = False
+    for raw in _SETTINGS_TEMPLATE.splitlines():
+        stripped = raw.strip()
+        if stripped == "[settings]":
+            in_settings = True
+            pending = []
+            continue
+        if not in_settings:
+            continue
+        if stripped.startswith("["):
+            break
+        if stripped.startswith("#"):
+            pending.append(raw.rstrip())
+            continue
+        if "=" in stripped:
+            name = stripped.split("=", 1)[0].strip()
+            if pending:
+                comments[name] = "\n".join(pending)
+                pending = []
+            continue
+        pending = []
+    return comments
+
+
+_GLOBAL_COMMENTS: dict[str, str] = _extract_global_comments()
 
 
 def get_settings_mtime() -> float:
@@ -248,34 +171,41 @@ def get_settings_mtime() -> float:
 
 
 def get_settings_version() -> int:
-    return _settings_version
+    with _settings_lock:
+        return _settings_version
 
 
 def _parse_settings_file() -> Settings:
     with open(SETTINGS_FILE, "rb") as f:
         data = tomllib.load(f)
     settings = Settings.from_dict(data)
-    if not settings.watch:
-        settings.watch = [WatchTarget(customer="18", balance_below=DEFAULT_BALANCE_BELOW)]
     for w in settings.watch:
         if w.balance_below is None:
             w.balance_below = DEFAULT_BALANCE_BELOW
     return settings
 
 
+def read_settings() -> Settings:
+    """Parse settings.toml without touching hot-reload bookkeeping."""
+    return _parse_settings_file()
+
+
 def load_settings() -> Settings:
     global _settings_mtime, _settings_version
     try:
-        _settings_mtime = get_settings_mtime()
+        mtime = get_settings_mtime()
         settings = _parse_settings_file()
-        _settings_version = 1
+        with _settings_lock:
+            _settings_mtime = mtime
+            _settings_version = 1
         return settings
     except FileNotFoundError:
         _write_template()
         return Settings(watch=[WatchTarget(customer="18", balance_below=DEFAULT_BALANCE_BELOW)])
     except Exception as e:
-        logging.error(f"Corrupted settings file: {e}")
-        return Settings(watch=[WatchTarget(customer="18", balance_below=DEFAULT_BALANCE_BELOW)])
+        # Never fall back to a default watch on a parse error: that would silently
+        # monitor the wrong customer. Fail loudly instead.
+        raise SettingsError(f"Corrupted settings file {SETTINGS_FILE}: {e}") from e
 
 
 def _write_template() -> None:
@@ -288,14 +218,16 @@ def _write_template() -> None:
 
 
 def reload_settings(current: Settings) -> Settings | None:
-    global _settings_mtime, _settings_version
-    try:
-        new_mtime = get_settings_mtime()
-    except OSError:
-        return None
+    """Return freshly parsed settings if settings.toml changed, else None.
 
-    if new_mtime <= _settings_mtime:
-        return None
+    Change detection/logging is left to the caller (app._try_hot_reload) so the
+    diff is computed once.
+    """
+    global _settings_mtime, _settings_version
+    new_mtime = get_settings_mtime()
+    with _settings_lock:
+        if new_mtime <= _settings_mtime:
+            return None
 
     try:
         new_settings = _parse_settings_file()
@@ -306,123 +238,80 @@ def reload_settings(current: Settings) -> Settings | None:
         logging.warning(f"Settings reload failed (keeping current): {e}")
         return None
 
-    _settings_mtime = new_mtime
-    _settings_version += 1
-
-    old_ids = set(current.customer_ids)
-    new_ids = set(new_settings.customer_ids)
-    added = sorted(new_ids - old_ids)
-    removed = sorted(old_ids - new_ids)
-
-    if added or removed:
-        parts: list[str] = []
-        if added:
-            parts.append(f"added {', '.join(added)}")
-        if removed:
-            parts.append(f"removed {', '.join(removed)}")
-        logging.info(f"Settings v{_settings_version}: {', '.join(parts)}")
-
-    for cid in new_ids & old_ids:
-        old_w = current.get_watch(cid)
-        new_w = new_settings.get_watch(cid)
-        changes: list[str] = []
-        for attr in ("balance_below", "margin_below", "billed_above"):
-            oval = getattr(old_w, attr, None)
-            nval = getattr(new_w, attr, None)
-            if oval != nval:
-                changes.append(f"{attr}: {oval} -> {nval}")
-        if changes:
-            logging.info(f"Settings v{_settings_version}: customer {cid} changed ({'; '.join(changes)})")
-
+    with _settings_lock:
+        _settings_mtime = new_mtime
+        _settings_version += 1
     return new_settings
 
 
+def _toml_str(value: str) -> str:
+    escaped = (
+        value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+    )
+    return f'"{escaped}"'
+
+
 def save_settings(settings: Settings) -> None:
+    if os.path.exists(SETTINGS_FILE):
+        try:
+            shutil.copy2(SETTINGS_FILE, SETTINGS_FILE + ".bak")
+        except OSError:
+            pass
+
     lines: list[str] = [
         "# InstacallMonitor - Settings",
+        "# Edit this file to configure monitoring thresholds and watch targets.",
+        "# Changes take effect on the next check cycle (hot-reload).",
         "",
         "[settings]",
     ]
     for f in fields(GlobalSettings):
+        comment = _GLOBAL_COMMENTS.get(f.name)
+        if comment:
+            lines.append(comment)
         val = getattr(settings.global_, f.name)
         if isinstance(val, str):
-            lines.append(f'{f.name} = "{val}"')
+            lines.append(f"{f.name} = {_toml_str(val)}")
         elif isinstance(val, bool):
             lines.append(f"{f.name} = {str(val).lower()}")
         else:
             lines.append(f"{f.name} = {val}")
 
     lines.append("")
+    lines.append("# Add one [[watch]] block for each customer to monitor.")
+    lines.append('# The "customer" field is the numeric customer ID from the Instacall portal.')
+    lines.append("# All other fields are optional overrides of the global defaults above.")
+    lines.append("")
     for w in settings.watch:
         lines.append("[[watch]]")
-        lines.append(f'customer = "{w.customer}"')
+        lines.append(f"customer = {_toml_str(w.customer)}")
         if w.name:
-            lines.append(f'name = "{w.name}"')
-        lines.append(f"balance_below = {_fmt_val(w.balance_below)}")
+            lines.append(f"name = {_toml_str(w.name)}")
+        lines.append(f"balance_below = {fmt_val(w.balance_below)}")
         for key in ("margin_below", "margin_above", "margin_deadband", "billed_above"):
             val = getattr(w, key)
             if val is not None:
-                lines.append(f"{key} = {_fmt_val(val)}")
+                lines.append(f"{key} = {fmt_val(val)}")
         lines.append("")
 
     content = "\n".join(lines) + "\n"
-    with tempfile.NamedTemporaryFile(mode="w", dir=_BASE_DIR, delete=False, suffix=".tmp", encoding="utf-8") as tmp:
-        tmp.write(content)
-        tmp_path = tmp.name
-    os.replace(tmp_path, SETTINGS_FILE)
-
-
-def get_credentials() -> tuple[str, str]:
-    load_dotenv()
-    username = os.getenv("PORTAL_USERNAME")
-    password = os.getenv("PORTAL_PASSWORD")
-    if not username or not password:
-        raise ValueError("PORTAL_USERNAME or PASSWORD not found in .env file.")
-    return username, password
-
-
-def validate_settings(settings: Settings) -> list[str]:
-    errors: list[str] = []
-    g = settings.global_
-
-    if not settings.watch:
-        errors.append("at least one [[watch]] block is required in settings.toml")
-    else:
-        for w in settings.watch:
-            if w.balance_below is None:
-                errors.append(f"customer '{w.customer}' is missing 'balance_below' — set it in their [[watch]] block")
-
-    if g.check_interval <= 0:
-        errors.append(f"check_interval must be > 0 (got {g.check_interval})")
-    if g.request_timeout <= 0:
-        errors.append(f"request_timeout must be > 0 (got {g.request_timeout})")
-
-    if g.cooldown < 0:
-        errors.append(f"cooldown must be >= 0 (got {g.cooldown})")
-    if g.margin_deadband < 0:
-        errors.append(f"margin_deadband must be >= 0 (got {g.margin_deadband})")
-    margin_range_half = (g.margin_above - g.margin_below) / 2
-    if g.margin_above <= g.margin_below:
-        errors.append(f"margin_above ({g.margin_above}) must be > margin_below ({g.margin_below})")
-    elif g.margin_deadband >= margin_range_half:
-        errors.append(
-            f"margin_deadband ({g.margin_deadband}) must be < "
-            f"(margin_above - margin_below) / 2 = {margin_range_half:.1f}"
-        )
-    if g.db_retention_days < 0:
-        errors.append(f"db_retention_days must be >= 0 (got {g.db_retention_days})")
-    if g.summary_direction not in ("outbound", "inbound"):
-        errors.append(f"summary_direction must be 'outbound' or 'inbound' (got '{g.summary_direction}')")
-    if g.max_workers < 1:
-        errors.append(f"max_workers must be >= 1 (got {g.max_workers})")
-    if g.retry_max_delay < g.retry_base_delay:
-        errors.append(f"retry_max_delay ({g.retry_max_delay}) must be >= retry_base_delay ({g.retry_base_delay})")
-
-    return errors
+    tmp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", dir=_BASE_DIR, delete=False, suffix=".tmp", encoding="utf-8") as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+        os.replace(tmp_path, SETTINGS_FILE)
+    except BaseException:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        raise
 
 
 def setup_logging() -> None:
-    handler = RotatingFileHandler(LOG_FILE, maxBytes=1_000_000, backupCount=5)
+    handler: logging.Handler = RotatingFileHandler(LOG_FILE, maxBytes=1_000_000, backupCount=5)
     handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s", "%Y-%m-%d %H:%M:%S"))
     root = logging.getLogger("")
     root.handlers.clear()

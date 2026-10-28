@@ -1,5 +1,7 @@
 # InstacallMonitor v3.0.0
 
+[![CI](https://github.com/siamakanda/InstacallMonitor/actions/workflows/ci.yml/badge.svg)](https://github.com/siamakanda/InstacallMonitor/actions/workflows/ci.yml)
+
 Real-time balance and margin monitoring for the Instacall Switch Portal. Alerts via desktop notifications and audible sirens when thresholds are breached.
 
 ## Quick Start (Any Device)
@@ -46,6 +48,8 @@ python monitor.py
 - **Triple siren patterns** — rising/falling sweep (balance), alternating two-tone (margin low), steady pulse (margin high)
 - **Non-blocking alerts** — sirens play in background threads, monitoring continues
 - **Desktop notifications** — Windows toast notifications via `plyer`
+- **Web dashboard** — built-in local HTTP settings page (stdlib only) that mirrors the TUI config, with add/remove editing of balance-check customers
+- **Cross-platform sirens** — `winsound` on Windows, generated WAV playback (`afplay`/`aplay`/`paplay`/`ffplay`) on macOS/Linux
 - **Alert cooldown** — configurable cooldown per customer to prevent alert storms
 - **SQLite history** — persistent balance, margin, and alert_state tables with auto-retention
 - **CSV export** — export balance/margin history for reporting
@@ -64,6 +68,9 @@ python monitor.py --export     # export all history to CSV
 python monitor.py --help       # show all options
 ```
 
+Installing the project (`pip install .`) also exposes the same interface as the
+`instacallmonitor` command, and `pip install -e ".[dev]"` pulls in the test/lint/type tools.
+
 | Flag | Description |
 |------|-------------|
 | `--run-once` | Run a single monitoring cycle then exit |
@@ -78,6 +85,41 @@ python monitor.py --help       # show all options
 | `--cooldown N` | Override alert cooldown (seconds) |
 | `--export-customer ID` | Export history for a specific customer |
 | `--no-hot-reload` | Disable settings hot-reload |
+| `--no-web` | Disable the web dashboard |
+| `--web-port N` | Override the dashboard port |
+
+## Web Dashboard
+
+A dependency-free settings page (Python stdlib only) starts automatically alongside the monitor. It binds
+to `127.0.0.1:8765` by default and mirrors the TUI: a live status strip (alive, uptime, cycles, errors,
+settings version), a config summary line, an editor for every global setting, and a table of
+balance-check customers.
+
+```
+Dashboard  http://127.0.0.1:8765
+```
+
+Configure or disable it in `settings.toml` (`web_dashboard`, `web_dashboard_host`, `web_dashboard_port`,
+`web_dashboard_refresh`) or via `--no-web` / `--web-port N`. It binds to localhost by default — if you
+expose it beyond localhost, put it behind your own auth/proxy.
+
+### Editing settings
+
+Everything is edited in place:
+
+- **Settings** — every global value, grouped (General, Thresholds, Sirens, Resilience, Dashboard).
+- **Balance-check customers** — an input + dropdown table. Pick a known customer from the list or type an
+  ID, set `balance_below` (required) and any per-customer overrides, then add or remove rows.
+
+Saving writes `settings.toml` (keeping a `settings.toml.bak` copy and the file's comments), validates the
+values first, and wakes the monitor so hot-reload applies them within about a second — no restart needed,
+except for a changed dashboard host/port (shown as a warning).
+
+Writes go through `POST /api/settings`, which requires a JSON content type and same-origin requests, so a
+random web page in your browser cannot silently rewrite your config.
+
+The JSON endpoints it serves can also be scraped directly: `/api/status`, `/api/customers`,
+`/api/history?customer_id=ID&hours=24`, `/api/alerts`, and `GET`/`POST /api/settings`.
 
 ## Console Output
 
@@ -90,6 +132,8 @@ python monitor.py --help       # show all options
   Audio  ON  |  Cooldown 300s  |  DB retention 30d
   Workers 4  |  Hot-reload ON
   Ctrl+C to stop.
+
+  Dashboard  http://127.0.0.1:8765
 
   [23:45:01] [B] TestCo (ID: 18)  Balance -229.8235  / Credit: 600.00
   [23:45:02] [M] TestCo (ID: 18)  Margin 52.9%  |  Billed 1167.8 min [MONITORED]
@@ -117,6 +161,12 @@ siren_min_freq = 2200             # lowest siren frequency (Hz)
 siren_max_freq = 3500             # highest siren frequency (Hz)
 siren_step_freq = 130             # frequency step between beeps (Hz)
 siren_tone_duration = 50          # duration of each beep (ms)
+
+# Web dashboard (stdlib HTTP server, localhost by default)
+web_dashboard = true              # enable the built-in dashboard
+web_dashboard_host = "127.0.0.1"  # bind address
+web_dashboard_port = 8765         # dashboard port
+web_dashboard_refresh = 5         # browser auto-refresh interval (seconds)
 
 # Global defaults (applied to ALL customers in summary report)
 margin_below = 30.0               # alert when margin drops below this %
@@ -160,17 +210,33 @@ margin_deadband = 5.0             # override global margin deadband
 
 ```
 InstacallMonitor/
-  monitor.py           — Main entry point: CLI parsing, monitor loop, export
-  config.py            — Settings dataclasses, TOML load/save, validation, profiles
-  auth.py              — CSRF login, session creation
-  scrapers.py          — HTML parsers + fetch_balance + fetch_summary_report, retry logic
-  alerts.py            — SirenManager, desktop notifications, alert escalation, deadband logic
-  display.py           — Console formatting, ANSI colors, [B]/[M] prefixes
-  persistence.py       — SQLite ORM (balance, margin, alert_state tables), CSV export
-  circuit_breaker.py   — Circuit breaker pattern for resilient HTTP requests
-  settings.toml        — Runtime configuration (global + per-customer overrides)
-  .env                 — Portal credentials (never committed)
-  tests/               — 76 pytest tests
+  monitor.py            — Thin entrypoint (delegates to app.main)
+  app.py                — Orchestration: main(), monitor loop, run-once/export
+  cycles.py             — Per-cycle processing: persist results, alerts, dashboard state
+  reporting.py          — Console output: banner, session summary, dashboard URL, CSV export
+  cli.py                — Argument parsing, help text, CLI overrides
+  runtime.py            — Shared Runtime state (shutdown event, counters, health snapshot)
+  health.py             — monitor.status write/read, --status and --tail rendering
+  config.py             — Settings facade: paths, TOML load/save/reload (re-exports below)
+  settings_models.py    — Settings dataclasses + value coercion
+  settings_validation.py— Settings validation
+  credentials.py        — .env credential loading
+  settings_diff.py      — Settings change detection for hot-reload
+  auth.py               — CSRF login, session creation
+  scrapers.py           — Scraper facade (re-exports the client and parser)
+  scraper_client.py     — HTTP fetch layer with circuit breakers + retry policy
+  scraper_parser.py     — Pure HTML parsers
+  alerts.py             — Alert evaluation, escalation, deadband logic
+  siren.py              — Siren manager (cooldown + playback)
+  notify.py             — Desktop notifications
+  audio.py              — Tone-sequence model + cached WAV rendering + cross-platform playback
+  webapp.py             — Stdlib HTTP dashboard: live state, JSON API, settings editor
+  display.py            — Console formatting, ANSI colors, [B]/[M] prefixes
+  persistence.py        — SQLite ORM (balance, margin, alert_state tables), CSV export
+  circuit_breaker.py    — Circuit breaker pattern for resilient HTTP requests
+  settings.toml         — Runtime configuration (global + per-customer overrides)
+  .env                  — Portal credentials (never committed)
+  tests/                — 195 pytest tests
 ```
 
 ## Files (Runtime)
@@ -186,5 +252,7 @@ InstacallMonitor/
 ## Requirements
 
 - Python 3.10+
-- Windows for `winsound` audio (sirens silently skipped on macOS/Linux)
+- Audio: `winsound` on Windows; on macOS/Linux the siren is rendered to WAV and played via the first of
+  `afplay`, `aplay`, `paplay` or `ffplay` found on `PATH` (falls back to the terminal bell if none exist)
+- Windows toast notifications via `plyer` (notifications elsewhere depend on `plyer` backends)
 - Portal credentials in `.env`
