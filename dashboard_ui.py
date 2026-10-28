@@ -1,6 +1,10 @@
 """The dashboard's single self-contained HTML page (stdlib-only, no build step).
 
 Kept separate from webapp.py so the HTTP/API layer stays focused.
+
+Visual direction: a telecom instrument console. Warm graphite surfaces, one amber
+signal accent, hairline rules, tabular mono readings. Product register: dense,
+quiet, legible; settings primary, live monitoring secondary.
 """
 
 from __future__ import annotations
@@ -11,133 +15,404 @@ _PAGE_TEMPLATE = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="csrf-token" content="%CSRF%">
+<meta name="color-scheme" content="dark">
 <title>InstacallMonitor</title>
 <style>
-  :root { --bg:#0f1115; --panel:#171a21; --line:#262b36; --fg:#e6e8ee; --dim:#8a93a6;
-          --green:#50fa7b; --red:#ff5555; --yellow:#f1fa8c; --magenta:#ff79c6; --cyan:#8be9fd; }
+  :root {
+    --canvas: oklch(0.185 0.008 70);
+    --surface: oklch(0.225 0.010 70);
+    --surface-2: oklch(0.262 0.012 70);
+    --surface-3: oklch(0.300 0.013 70);
+    --line: oklch(0.330 0.012 70);
+    --line-strong: oklch(0.440 0.014 70);
+    --text: oklch(0.940 0.008 75);
+    --muted: oklch(0.720 0.012 75);
+    --faint: oklch(0.660 0.012 75);
+    --accent: oklch(0.790 0.140 72);
+    --accent-dim: oklch(0.620 0.110 72);
+    --accent-ink: oklch(0.190 0.020 70);
+    --ok: oklch(0.780 0.130 150);
+    --warn: oklch(0.830 0.130 90);
+    --err: oklch(0.700 0.180 28);
+    --radius-lg: 12px;
+    --radius: 9px;
+    --radius-sm: 7px;
+    --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px; --s7: 48px;
+    --font-ui: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --font-mono: ui-monospace, "Cascadia Code", "SFMono-Regular", Menlo, Consolas, monospace;
+  }
   * { box-sizing: border-box; }
-  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.5 "Segoe UI", system-ui, sans-serif; }
-  header { padding:14px 22px 0; border-bottom:1px solid var(--line); position:sticky; top:0;
-           background:var(--bg); z-index:5; }
-  .statusstrip { display:flex; flex-wrap:wrap; gap:10px 22px; align-items:baseline; padding-bottom:12px; }
-  h1 { font-size:17px; margin:0; letter-spacing:.3px; }
-  .stat { color:var(--dim); font-size:13px; }
-  .stat b { color:var(--fg); font-weight:600; }
-  .tabs { display:flex; gap:4px; }
-  .tab { padding:8px 16px; border:1px solid var(--line); border-bottom:none; border-radius:8px 8px 0 0;
-         background:var(--panel); color:var(--dim); cursor:pointer; font:inherit; }
-  .tab.active { background:var(--bg); color:var(--fg); border-color:var(--line); }
-  main { padding:18px 22px 60px; max-width:1100px; }
-  section.tabpane { display:none; }
-  section.tabpane.active { display:block; }
-  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.12em; color:var(--dim); margin:24px 0 10px; }
-  h3 { font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--dim); margin:16px 0 8px; }
-  .summaryline { background:var(--panel); border:1px solid var(--line); border-radius:8px;
-       padding:12px 16px; color:var(--dim); font-size:13px; }
-  .summaryline b { color:var(--fg); font-weight:600; }
-  table { width:100%; border-collapse:collapse; background:var(--panel);
-          border:1px solid var(--line); border-radius:8px; overflow:hidden; }
-  th, td { padding:8px 10px; text-align:left; border-bottom:1px solid var(--line); white-space:nowrap; }
-  th { font-size:12px; color:var(--dim); font-weight:600; background:#12141a; }
-  tr:last-child td { border-bottom:none; }
-  td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
-  .muted { color:var(--dim); }
-  .empty { color:var(--dim); padding:14px 4px; }
-  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:12px 24px; }
-  .sfield { display:grid; grid-template-columns:1fr 140px; align-items:center; gap:2px 12px; font-size:13px; }
-  .sfield input, .sfield select { width:140px; }
-  .fielderr { grid-column:1 / -1; color:var(--red); font-size:12px; display:none; }
-  .sfield.invalid .fielderr { display:block; }
-  input.invalid, select.invalid { border-color:var(--red); }
-  input, select { background:var(--panel); color:var(--fg); border:1px solid var(--line);
-       border-radius:6px; padding:5px 8px; font:inherit; }
-  #watch-rows input { width:118px; }
-  #watch-rows td { vertical-align:top; }
-  #watch-rows .fielderr { display:none; color:var(--red); font-size:11px; white-space:normal; max-width:130px; }
-  #watch-rows td.invalid .fielderr { display:block; }
-  .btn { background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:6px;
-         padding:7px 12px; cursor:pointer; font-size:13px; }
-  .btn.primary { background:#2b6cb0; border-color:#2b6cb0; color:#fff; }
-  .btn.primary:disabled { opacity:.5; cursor:default; }
-  .btn.small { padding:3px 9px; line-height:1.2; }
-  .savebar { margin-top:20px; display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
-  .okmsg { background:rgba(80,250,123,.12); border:1px solid rgba(80,250,123,.4); padding:10px 14px;
-           border-radius:8px; margin-top:12px; }
-  .warnmsg { background:rgba(241,250,140,.1); border:1px solid rgba(241,250,140,.4); color:var(--yellow);
-           padding:10px 14px; border-radius:8px; margin-top:8px; }
-  .errmsg { background:rgba(255,85,85,.12); border:1px solid rgba(255,85,85,.4); padding:10px 14px;
-           border-radius:8px; margin-top:12px; }
-  .errmsg ul { margin:6px 0 0; padding-left:18px; }
-  .hint { color:var(--dim); font-size:12px; margin-top:8px; }
-  .dot { color:var(--yellow); }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--canvas); color: var(--text);
+    font: 14px/1.55 var(--font-ui);
+    -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;
+  }
+  h1, h2, h3, p { margin: 0; }
+  .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+  }
+
+  /* ---- command bar ---- */
+  .topbar {
+    position: sticky; top: 0; z-index: 20;
+    display: flex; flex-wrap: wrap; align-items: center; gap: var(--s3) var(--s5);
+    padding: var(--s3) var(--s5);
+    background: var(--canvas);
+    border-bottom: 1px solid var(--line);
+  }
+  .brand { display: flex; align-items: center; gap: var(--s3); margin-inline-end: auto; }
+  .brand-mark {
+    width: 26px; height: 26px; border-radius: var(--radius-sm);
+    border: 1px solid var(--line-strong); position: relative; flex: none;
+  }
+  .brand-mark::after {
+    content: ""; position: absolute; inset: 8px; border-radius: 50%;
+    background: var(--accent); box-shadow: 0 0 10px oklch(0.79 0.14 72 / 0.55);
+  }
+  .brand-name { font-size: 14.5px; font-weight: 600; letter-spacing: 0.01em; }
+  .brand-sub {
+    font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.16em;
+    color: var(--faint); margin-top: 1px;
+  }
+  .readout {
+    display: flex; flex-wrap: wrap; align-items: baseline;
+    gap: var(--s2) var(--s4);
+  }
+  .ro { display: inline-flex; align-items: baseline; gap: 6px; }
+  .ro-k {
+    font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.13em;
+    color: var(--faint);
+  }
+  .ro-v { font-family: var(--font-mono); font-size: 12.5px; color: var(--text); }
+  .ro-v.alert { color: var(--err); }
+
+  .tabs {
+    display: inline-flex; gap: 2px; padding: 3px;
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+  }
+  .tab {
+    font: inherit; font-size: 12.5px; color: var(--muted);
+    background: transparent; border: 0; border-radius: 5px;
+    padding: 7px 15px; cursor: pointer; min-height: 32px;
+  }
+  .tab:hover { color: var(--text); }
+  .tab[aria-selected="true"] { background: var(--surface-3); color: var(--text); }
+  .tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* ---- layout ---- */
+  main { max-width: 1180px; margin-inline: auto; padding: var(--s5) var(--s5) var(--s7); }
+  .pane[hidden] { display: none; }
+  .section { padding-block: var(--s5); border-top: 1px solid var(--line); }
+  .section:first-child { border-top: 0; padding-top: var(--s3); }
+  .section-head { margin-bottom: var(--s4); }
+  .section-head h2 {
+    font-size: 13px; font-weight: 600; letter-spacing: 0.02em;
+  }
+  .section-sub { color: var(--muted); font-size: 12.5px; margin-top: 3px; }
+  .subhead {
+    font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.13em;
+    color: var(--faint); margin: var(--s4) 0 var(--s2);
+  }
+
+  .readout-strip {
+    display: flex; flex-wrap: wrap; gap: var(--s2) var(--s5);
+    padding: var(--s3) var(--s4);
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: var(--radius);
+  }
+  .readout-strip .ro-v { font-size: 12px; }
+
+  /* ---- fields ---- */
+  .field-group + .field-group { margin-top: var(--s5); }
+  .group-title {
+    font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.15em;
+    color: var(--faint); padding-bottom: var(--s2);
+    border-bottom: 1px solid var(--line); margin-bottom: var(--s3);
+  }
+  .fields {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+    gap: var(--s3) var(--s4);
+  }
+
+  .field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+  .field-label { font-size: 12px; color: var(--muted); }
+  .field-hint { font-size: 11px; color: var(--faint); }
+  .field-err, .cell-err { display: none; color: var(--err); font-size: 11.5px; line-height: 1.35; }
+  .field.invalid .field-err { display: block; }
+  td.invalid .cell-err { display: block; }
+  .field.invalid .field-label { color: var(--err); }
+
+  input, select {
+    font: inherit; font-size: 13.5px; color: var(--text);
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: var(--radius-sm); padding: 8px 10px; min-height: 38px;
+    width: 100%; min-width: 0;
+  }
+  select {
+    appearance: none;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' fill='none' stroke='%238a93a6' stroke-width='1.5' stroke-linecap='round'/></svg>");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    padding-inline-end: 30px;
+  }
+  input:hover, select:hover { border-color: var(--line-strong); }
+  input:focus-visible, select:focus-visible, .btn:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 2px;
+  }
+  input:focus-visible, select:focus-visible { border-color: var(--accent-dim); }
+  input.invalid, select.invalid { border-color: var(--err); }
+  input::placeholder { color: var(--muted); opacity: 1; }
+  input[type="checkbox"] {
+    width: 18px; height: 18px; min-height: 0; accent-color: var(--accent);
+    justify-self: start; padding: 0; margin-block-start: 10px;
+  }
+  @media (max-width: 640px) {
+    input, select { font-size: 16px; } /* avoid iOS focus zoom */
+  }
+
+  /* ---- buttons ---- */
+  .btn {
+    font: inherit; font-size: 12.5px; color: var(--text);
+    background: var(--surface-2); border: 1px solid var(--line-strong);
+    border-radius: var(--radius-sm); padding: 8px 14px; min-height: 36px;
+    cursor: pointer; white-space: nowrap;
+  }
+  .btn:hover { background: var(--surface-3); border-color: var(--line-strong); }
+  .btn:active { transform: scale(0.98); }
+  .btn[disabled] { opacity: 0.45; cursor: not-allowed; }
+  .btn.primary {
+    background: var(--accent); border-color: var(--accent); color: var(--accent-ink);
+    font-weight: 600;
+  }
+  .btn.primary:hover:not([disabled]) { background: oklch(0.830 0.135 72); }
+  .btn.ghost { background: transparent; border-color: var(--line); color: var(--muted); }
+  .btn.ghost:hover { background: var(--surface); color: var(--text); }
+  .btn.icon {
+    background: transparent; border-color: transparent; color: var(--faint);
+    padding: 6px 9px; min-height: 32px;
+  }
+  .btn.icon:hover { color: var(--err); border-color: color-mix(in oklch, var(--err) 45%, transparent); }
+
+  /* ---- commit bar ---- */
+  .commitbar {
+    position: sticky; bottom: 0; z-index: 10;
+    display: flex; align-items: center; justify-content: flex-end; gap: var(--s4);
+    padding: var(--s3) 0;
+    background: var(--canvas);
+    border-top: 1px solid var(--line-strong);
+    box-shadow: 0 -10px 22px oklch(0 0 0 / 0.35);
+  }
+  .commit-status { margin-inline-end: auto; font-size: 12px; color: var(--warn); }
+
+  /* ---- tables ---- */
+  .table-wrap {
+    border: 1px solid var(--line); border-radius: var(--radius);
+    background: var(--surface); overflow-x: auto; -webkit-overflow-scrolling: touch;
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  thead th {
+    position: sticky; top: 0; z-index: 1;
+    background: var(--surface-2); color: var(--faint);
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; font-weight: 600;
+    text-align: start; padding: 9px 12px;
+    border-bottom: 1px solid var(--line); white-space: nowrap;
+  }
+  tbody td {
+    padding: 8px 12px; border-bottom: 1px solid color-mix(in oklch, var(--line) 55%, transparent);
+    vertical-align: top;
+  }
+  tbody tr:last-child td { border-bottom: 0; }
+  tbody tr:hover td { background: color-mix(in oklch, var(--surface-2) 55%, transparent); }
+  th.num, td.num { text-align: end; }
+  td.num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 12.5px; }
+  td.wide { white-space: normal; min-width: 160px; }
+  #watch-rows table { table-layout: fixed; min-width: 880px; }
+  #watch-rows th:nth-child(1) { width: 96px; }
+  #watch-rows th:nth-child(2) { width: 236px; }
+  #watch-rows th:nth-child(3) { width: 116px; }
+  #watch-rows th:nth-child(4) { width: 116px; }
+  #watch-rows th:nth-child(5) { width: 116px; }
+  #watch-rows th:nth-child(6) { width: 108px; }
+  #watch-rows th:nth-child(7) { width: 108px; }
+  #watch-rows th:nth-child(8) { width: 132px; }
+  #watch-rows th:nth-child(9) { width: 44px; }
+  #watch-rows td { vertical-align: top; }
+  #watch-rows td.num input { text-align: end; }
+  .neg { color: var(--err); }
+
+  /* ---- chips ---- */
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 2px 9px; border-radius: 999px;
+    font-size: 11px; line-height: 1.6; white-space: nowrap;
+    color: var(--muted); background: var(--surface-2); border: 1px solid var(--line-strong);
+  }
+  .chip::before {
+    content: ""; width: 6px; height: 6px; border-radius: 50%;
+    background: currentColor; flex: none;
+  }
+  .chip.nodot::before { display: none; }
+  .chip.ok { color: var(--ok); border-color: color-mix(in oklch, var(--ok) 40%, transparent);
+             background: color-mix(in oklch, var(--ok) 10%, transparent); }
+  .chip.alert { color: var(--err); border-color: color-mix(in oklch, var(--err) 45%, transparent);
+                background: color-mix(in oklch, var(--err) 12%, transparent); }
+  .chip.over { color: var(--accent); border-color: color-mix(in oklch, var(--accent) 40%, transparent);
+               background: color-mix(in oklch, var(--accent) 10%, transparent); }
+  .chip.warn { color: var(--warn); border-color: color-mix(in oklch, var(--warn) 40%, transparent);
+               background: color-mix(in oklch, var(--warn) 10%, transparent); }
+  .chips { display: flex; flex-wrap: wrap; gap: 4px; }
+
+  /* ---- states ---- */
+  .state {
+    padding: var(--s5) var(--s4); color: var(--faint); font-size: 13px;
+    text-align: center;
+  }
+  .state b { color: var(--muted); font-weight: 500; }
+  .notice {
+    padding: 10px 14px; border-radius: var(--radius-sm);
+    border: 1px solid var(--line-strong); background: var(--surface);
+    font-size: 12.5px; color: var(--muted); margin-top: var(--s3);
+  }
+  .notice.ok { border-color: color-mix(in oklch, var(--ok) 45%, transparent); color: var(--ok); }
+  .notice.err { border-color: color-mix(in oklch, var(--err) 45%, transparent); color: var(--err); }
+  .notice.warn { border-color: color-mix(in oklch, var(--warn) 45%, transparent); color: var(--warn); }
+  .notice ul { margin: 6px 0 0; padding-inline-start: 18px; }
+  .notice li + li { margin-top: 3px; }
+
+  .toolbar {
+    display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--s3);
+    margin-bottom: var(--s3);
+  }
+  .toolbar .field { max-width: 260px; min-width: 180px; }
+  .row-actions { margin-top: var(--s3); }
+
+  @media (max-width: 700px) {
+    .readout {
+      display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: var(--s2) var(--s4);
+    }
+    .ro { flex-direction: column; align-items: flex-start; gap: 0; }
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .btn { transition: background 150ms ease-out, border-color 150ms ease-out, transform 100ms ease-out; }
+    input, select, .tab { transition: border-color 150ms ease-out, background 150ms ease-out, color 150ms ease-out; }
+    .pane:not([hidden]) { animation: pane-in 180ms ease-out; }
+    @keyframes pane-in {
+      from { opacity: 0; transform: translateY(3px); }
+      to { opacity: 1; transform: none; }
+    }
+  }
 </style>
 </head>
 <body>
-<header>
-  <div class="statusstrip">
-    <h1>InstacallMonitor</h1>
-    <span class="stat" id="s-alive">--</span>
-    <span class="stat">Uptime <b id="s-uptime">--</b></span>
-    <span class="stat">Cycle <b id="s-cycle">--</b></span>
-    <span class="stat">Last check <b id="s-last">--</b></span>
-    <span class="stat">Errors <b id="s-errors">--</b></span>
-    <span class="stat">Settings v<b id="s-version">--</b></span>
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true"></span>
+    <div>
+      <div class="brand-name">InstacallMonitor</div>
+      <div class="brand-sub">balance &amp; margin console</div>
+    </div>
   </div>
-  <div class="tabs">
-    <button class="tab active" id="tabbtn-settings" onclick="showTab('settings')">Settings</button>
-    <button class="tab" id="tabbtn-live" onclick="showTab('live')">Live</button>
+
+  <div class="readout" role="group" aria-label="Monitor status">
+    <div class="ro"><span class="ro-k">state</span><span class="ro-v" id="s-alive">--</span></div>
+    <div class="ro"><span class="ro-k">uptime</span><span class="ro-v" id="s-uptime">--</span></div>
+    <div class="ro"><span class="ro-k">cycle</span><span class="ro-v" id="s-cycle">--</span></div>
+    <div class="ro"><span class="ro-k">last check</span><span class="ro-v" id="s-last">--</span></div>
+    <div class="ro"><span class="ro-k">errors</span><span class="ro-v" id="s-errors">--</span></div>
+    <div class="ro"><span class="ro-k">settings</span><span class="ro-v" id="s-version">--</span></div>
+  </div>
+
+  <div class="tabs" role="tablist" aria-label="Views">
+    <button class="tab" id="tabbtn-settings" role="tab" aria-selected="true"
+            aria-controls="tab-settings" onclick="showTab('settings')">Settings</button>
+    <button class="tab" id="tabbtn-live" role="tab" aria-selected="false" tabindex="-1"
+            aria-controls="tab-live" onclick="showTab('live')">Live</button>
   </div>
 </header>
+
 <main>
-  <section class="tabpane active" id="tab-settings">
-    <div class="summaryline" id="config-summary">Loading&hellip;</div>
+  <section class="pane" id="tab-settings" role="tabpanel" aria-labelledby="tabbtn-settings">
+    <div class="readout-strip" id="config-summary"></div>
 
-    <h2>Settings <span class="muted">(saved to settings.toml &middot; applied on save)</span></h2>
-    <div id="global-fields"><div class="empty">Loading&hellip;</div></div>
-
-    <h2>Balance-check customers</h2>
-    <div id="watch-rows"><div class="empty">Loading&hellip;</div></div>
-    <datalist id="customer-options"></datalist>
-    <div style="margin-top:10px">
-      <button class="btn small" onclick="addWatch()">+ Add customer</button>
-      <span class="hint">Pick a customer from the list or type an ID. Balance below is required.
-        Rates left blank fall back to the global defaults shown as placeholders.</span>
+    <div class="section">
+      <div class="section-head">
+        <h2>Settings</h2>
+        <p class="section-sub">Saved to settings.toml. Applied automatically within about a second.</p>
+      </div>
+      <div id="global-fields"><div class="state">Loading settings&hellip;</div></div>
     </div>
 
-    <div class="savebar">
+    <div class="section">
+      <div class="section-head">
+        <h2>Balance-check customers</h2>
+        <p class="section-sub">Blank overrides fall back to the global defaults shown in each field.</p>
+      </div>
+      <div id="watch-rows"><div class="state">Loading customers&hellip;</div></div>
+      <datalist id="customer-options"></datalist>
+      <div class="row-actions">
+        <button class="btn ghost" onclick="addWatch()">Add customer</button>
+      </div>
+    </div>
+
+    <div class="commitbar">
+      <div class="commit-status" id="dirty-hint"></div>
       <button class="btn primary" id="save-btn" onclick="saveSettings()" disabled>Save settings</button>
-      <span class="muted" id="dirty-hint" style="font-size:12px"></span>
     </div>
-    <div id="settings-status"></div>
-    <p class="hint">Localhost-only. Concurrent edits in another tab will be overwritten on save.</p>
+    <div id="settings-status" role="status" aria-live="polite"></div>
   </section>
 
-  <section class="tabpane" id="tab-live">
-    <h2>Current status</h2>
-    <div id="live-status"><div class="empty">Loading&hellip;</div></div>
-
-    <h2>History</h2>
-    <div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(220px,1fr));align-items:center">
-      <label class="sfield"><span>Customer</span><select id="hist-customer" onchange="loadHistory()"></select></label>
-      <label class="sfield"><span>Window</span>
-        <select id="hist-hours" onchange="loadHistory()">
-          <option value="1">Last 1h</option>
-          <option value="6">Last 6h</option>
-          <option value="24" selected>Last 24h</option>
-          <option value="168">Last 7d</option>
-        </select>
-      </label>
-      <div><button class="btn small" onclick="loadHistory()">Refresh</button></div>
+  <section class="pane" id="tab-live" role="tabpanel" aria-labelledby="tabbtn-live" hidden>
+    <div class="section">
+      <div class="section-head">
+        <h2>Current status</h2>
+        <p class="section-sub">Latest readings from the running monitor.</p>
+      </div>
+      <div id="live-status"><div class="state">Waiting for the first cycle&hellip;</div></div>
     </div>
-    <h3>Balances</h3>
-    <div id="hist-balance"><div class="empty">&ndash;</div></div>
-    <h3>Margins</h3>
-    <div id="hist-margin"><div class="empty">&ndash;</div></div>
 
-    <h2>Alerts</h2>
-    <div id="live-alerts"><div class="empty">Loading&hellip;</div></div>
+    <div class="section">
+      <div class="section-head">
+        <h2>History</h2>
+        <p class="section-sub">Recorded samples from the local database.</p>
+      </div>
+      <div class="toolbar">
+        <label class="field">
+          <span class="field-label">Customer</span>
+          <select id="hist-customer" onchange="loadHistory()"></select>
+        </label>
+        <label class="field">
+          <span class="field-label">Window</span>
+          <select id="hist-hours" onchange="loadHistory()">
+            <option value="1">Last hour</option>
+            <option value="6">Last 6 hours</option>
+            <option value="24" selected>Last 24 hours</option>
+            <option value="168">Last 7 days</option>
+          </select>
+        </label>
+        <button class="btn" onclick="loadHistory()">Refresh</button>
+      </div>
+      <h3 class="subhead">Balances</h3>
+      <div id="hist-balance"><div class="state">No samples yet.</div></div>
+      <h3 class="subhead">Margins</h3>
+      <div id="hist-margin"><div class="state">No samples yet.</div></div>
+    </div>
+
+    <div class="section">
+      <div class="section-head">
+        <h2>Alerts</h2>
+        <p class="section-sub">Persisted alert state per customer and alert type.</p>
+      </div>
+      <div id="live-alerts"><div class="state">No alert state recorded.</div></div>
+    </div>
   </section>
 </main>
+
 <script>
 const REFRESH = %REFRESH%;
 const CSRF = "%CSRF%";
@@ -184,7 +459,9 @@ const WATCH_KEYS = [
   ['margin_deadband','Deadband %'],
   ['billed_above','Billed above'],
 ];
+const WATCH_NUM = ['balance_below','margin_below','margin_above','margin_deadband','billed_above'];
 const OVERRIDE_KEYS = ['margin_below','margin_above','margin_deadband','billed_above'];
+const OVERRIDE_LABEL = { margin_below: 'low', margin_above: 'high', margin_deadband: 'deadband', billed_above: 'billed' };
 
 let currentWatch = [];
 let knownCustomers = [];
@@ -206,24 +483,35 @@ function clearDirty() {
 
 function showTab(name) {
   activeTab = name;
-  for (const t of ['settings','live']) {
-    $('tab-' + t).classList.toggle('active', t === name);
-    $('tabbtn-' + t).classList.toggle('active', t === name);
+  for (const t of ['settings', 'live']) {
+    const pane = $('tab-' + t);
+    const btn = $('tabbtn-' + t);
+    const on = t === name;
+    pane.hidden = !on;
+    btn.setAttribute('aria-selected', on ? 'true' : 'false');
+    btn.tabIndex = on ? 0 : -1;
   }
-  if (name === 'live') { loadLive(); }
+  try { history.replaceState(null, '', '#' + name); } catch (e) {}
+  if (name === 'live') loadLive();
 }
 
-function inputHtml(key, type, value, options) {
+function inputHtml(key, type, value, options, id) {
   const k = esc(key);
-  if (type === 'bool') return '<input type="checkbox" data-k="' + k + '"' + (value ? ' checked' : '') + '>';
+  const described = ' aria-describedby="e-' + k + '"';
+  if (type === 'bool') {
+    return '<input type="checkbox" id="' + esc(id) + '" data-k="' + k + '"' + described
+      + (value ? ' checked' : '') + '>';
+  }
   if (type === 'select') {
-    return '<select data-k="' + k + '">' + (options || []).map(function (o) {
-      return '<option' + (o === value ? ' selected' : '') + '>' + esc(o) + '</option>';
-    }).join('') + '</select>';
+    return '<select id="' + esc(id) + '" data-k="' + k + '"' + described + '>'
+      + (options || []).map(function (o) {
+        return '<option' + (o === value ? ' selected' : '') + '>' + esc(o) + '</option>';
+      }).join('') + '</select>';
   }
   const it = (type === 'text') ? 'text' : 'number';
   const step = (type === 'int') ? '1' : 'any';
-  return '<input type="' + it + '" step="' + step + '" data-k="' + k + '" value="' + esc(value) + '">';
+  return '<input type="' + it + '" step="' + step + '" id="' + esc(id) + '" data-k="' + k + '"'
+    + described + ' value="' + esc(value) + '">';
 }
 
 function readInput(el) {
@@ -233,28 +521,31 @@ function readInput(el) {
 }
 
 function renderGlobal(g) {
-  const groups = {}, order = [];
+  const groups = {};
+  const order = [];
   for (const f of FIELDS) {
     if (!groups[f[2]]) { groups[f[2]] = []; order.push(f[2]); }
     groups[f[2]].push(f);
   }
   let html = '';
   for (const gname of order) {
-    html += '<div><h3>' + esc(gname) + '</h3><div class="grid">';
+    html += '<div class="field-group"><h3 class="group-title">' + esc(gname) + '</h3><div class="fields">';
     for (const f of groups[gname]) {
-      html += '<div class="sfield" data-field="' + esc(f[0]) + '"><span>' + esc(f[1]) + '</span>'
-        + inputHtml(f[0], f[3], g[f[0]], f[4]) + '<div class="fielderr"></div></div>';
+      html += '<div class="field" data-field="' + esc(f[0]) + '">'
+        + '<label class="field-label" for="g-' + esc(f[0]) + '">' + esc(f[1]) + '</label>'
+        + inputHtml(f[0], f[3], g[f[0]], f[4], 'g-' + f[0])
+        + '<div class="field-err" id="e-' + esc(f[0]) + '"></div></div>';
     }
     html += '</div></div>';
   }
   $('global-fields').innerHTML = html;
-  $('global-fields').addEventListener('input', onEdit);
-  $('global-fields').addEventListener('change', onEdit);
+  $('global-fields').oninput = onEdit;
+  $('global-fields').onchange = onEdit;
 }
 
 function watchPlaceholder(key) {
-  return (globalDefaults[key] === undefined || globalDefaults[key] === null) ? ''
-    : 'global: ' + globalDefaults[key];
+  return (globalDefaults[key] === undefined || globalDefaults[key] === null)
+    ? '' : 'global ' + globalDefaults[key];
 }
 
 function renderWatch() {
@@ -263,33 +554,42 @@ function renderWatch() {
   }).join('');
 
   if (!currentWatch.length) {
-    $('watch-rows').innerHTML = '<div class="empty">No balance-check customers. Add one below.</div>';
+    $('watch-rows').innerHTML = '<div class="state">No customers yet. <b>Add customer</b> to start '
+      + 'monitoring a balance.</div>';
     return;
   }
-  let heads = '';
-  for (const f of WATCH_KEYS) heads += '<th>' + esc(f[1]) + '</th>';
-  heads += '<th>Overrides</th><th></th>';
+  let heads = WATCH_KEYS.map(function (f) {
+    return '<th' + (WATCH_NUM.indexOf(f[0]) !== -1 ? ' class="num"' : '') + '>' + esc(f[1]) + '</th>';
+  }).join('');
+  heads += '<th>Overrides</th><th><span class="sr-only">Remove</span></th>';
+
   let rows = '';
   currentWatch.forEach(function (w, i) {
     rows += '<tr data-row="' + i + '">';
-    rows += '<td><input list="customer-options" data-k="customer" value="' + esc(w.customer)
-      + '" oninput="onCustomerInput(' + i + ', this.value)"><div class="fielderr"></div></td>';
-    rows += '<td><input type="text" data-k="name" value="' + esc(w.name) + '"><div class="fielderr"></div></td>';
-    rows += '<td><input type="number" step="any" data-k="balance_below" value="'
+    rows += '<td><input list="customer-options" data-k="customer" aria-label="Customer ID" title="'
+      + esc(w.customer) + '" value="' + esc(w.customer)
+      + '" oninput="this.title=this.value; onCustomerInput(' + i + ', this.value)"><div class="cell-err"></div></td>';
+    rows += '<td><input type="text" data-k="name" aria-label="Customer name" title="' + esc(w.name)
+      + '" value="' + esc(w.name)
+      + '" oninput="this.title=this.value"><div class="cell-err"></div></td>';
+    rows += '<td class="num"><input type="number" step="any" data-k="balance_below" aria-label="Balance below" value="'
       + (w.balance_below === null || w.balance_below === undefined ? '' : esc(w.balance_below))
-      + '"><div class="fielderr"></div></td>';
+      + '"><div class="cell-err"></div></td>';
     for (const key of OVERRIDE_KEYS) {
       const v = w[key];
-      rows += '<td><input type="number" step="any" data-k="' + key + '" value="'
-        + (v === null || v === undefined ? '' : esc(v)) + '" placeholder="' + esc(watchPlaceholder(key))
-        + '"><div class="fielderr"></div></td>';
+      rows += '<td class="num"><input type="number" step="any" data-k="' + key + '" aria-label="'
+        + esc(key.replace(/_/g, ' ')) + '" placeholder="' + esc(watchPlaceholder(key)) + '" value="'
+        + (v === null || v === undefined ? '' : esc(v)) + '"><div class="cell-err"></div></td>';
     }
-    rows += '<td class="muted overrides"></td>';
-    rows += '<td><button class="btn small" title="Remove" onclick="removeWatch(' + i + ')">x</button></td></tr>';
+    rows += '<td><div class="chips overrides-cell"></div></td>';
+    rows += '<td class="num"><button class="btn icon" title="Remove customer" aria-label="Remove customer '
+      + esc(w.customer || 'row') + '" onclick="removeWatch(' + i + ')">&times;</button></td></tr>';
   });
-  $('watch-rows').innerHTML = '<table><thead><tr>' + heads + '</tr></thead><tbody>' + rows + '</tbody></table>';
-  $('watch-rows').addEventListener('input', onEdit);
-  $('watch-rows').addEventListener('change', onEdit);
+
+  $('watch-rows').innerHTML = '<div class="table-wrap"><table><thead><tr>' + heads
+    + '</tr></thead><tbody>' + rows + '</tbody></table></div>';
+  $('watch-rows').oninput = onEdit;
+  $('watch-rows').onchange = onEdit;
   updateOverrideMarkers();
 }
 
@@ -299,8 +599,13 @@ function updateOverrideMarkers() {
       const el = tr.querySelector('[data-k="' + k + '"]');
       return el && el.value !== '';
     });
-    const cell = tr.querySelector('.overrides');
-    if (cell) cell.innerHTML = set.length ? '<span class="dot">&#9679;</span> ' + esc(set.join(', ')) : '';
+    const cell = tr.querySelector('.overrides-cell');
+    if (!cell) return;
+    cell.innerHTML = set.length
+      ? set.map(function (k) {
+        return '<span class="chip nodot over">' + esc(OVERRIDE_LABEL[k] || k) + '</span>';
+      }).join('')
+      : '<span class="muted" style="color:var(--faint);font-size:11.5px">global</span>';
   });
 }
 
@@ -362,10 +667,14 @@ function onEdit() {
 }
 
 function clearFieldErrors() {
-  document.querySelectorAll('.sfield.invalid, #watch-rows td.invalid').forEach(function (n) {
+  document.querySelectorAll('.field.invalid, #watch-rows td.invalid').forEach(function (n) {
     n.classList.remove('invalid');
   });
-  document.querySelectorAll('.fielderr').forEach(function (n) { n.textContent = ''; });
+  document.querySelectorAll('.field.invalid input, .field.invalid select, td.invalid input').forEach(function (n) {
+    n.classList.remove('invalid');
+    n.setAttribute('aria-invalid', 'false');
+  });
+  document.querySelectorAll('.fielderr, .field-err, .cell-err').forEach(function (n) { n.textContent = ''; });
 }
 
 function findWatchRow(customer) {
@@ -382,20 +691,20 @@ function applyFieldErrors(fieldErrors) {
   const banner = [];
   for (const fe of fieldErrors) {
     let container = null;
+    let input = null;
     if (fe.customer) {
       const tr = findWatchRow(fe.customer);
-      const input = tr ? tr.querySelector('[data-k="' + fe.field + '"]') : null;
-      if (input) { container = input.closest('td'); input.classList.add('invalid'); }
+      input = tr ? tr.querySelector('[data-k="' + fe.field + '"]') : null;
+      container = input ? input.closest('td') : null;
     } else {
-      const field = document.querySelector('#global-fields .sfield[data-field="' + fe.field + '"]');
-      if (field) {
-        container = field;
-        const input = field.querySelector('[data-k]');
-        if (input) input.classList.add('invalid');
-      }
+      container = document.querySelector('#global-fields .field[data-field="' + fe.field + '"]');
+      input = container ? container.querySelector('[data-k]') : null;
     }
-    if (container) {
-      const errEl = container.querySelector('.fielderr');
+    if (container && input) {
+      container.classList.add('invalid');
+      input.classList.add('invalid');
+      input.setAttribute('aria-invalid', 'true');
+      const errEl = container.querySelector('.field-err, .cell-err');
       if (errEl) errEl.textContent = fe.message;
       else banner.push(fe.message);
     } else {
@@ -407,17 +716,21 @@ function applyFieldErrors(fieldErrors) {
 
 function updateSummary() {
   const g = collectGlobal();
-  const on = v => v ? 'ON' : 'OFF';
-  $('config-summary').innerHTML =
-    '<b>' + currentWatch.length + '</b> customers monitored'
-    + ' &middot; every <b>' + num(g.check_interval) + 's</b>'
-    + ' &middot; margin <b>' + num(g.margin_below) + '&ndash;' + num(g.margin_above) + '%</b>'
-    + ' &middot; deadband <b>' + num(g.margin_deadband) + '%</b>'
-    + ' &middot; billed above <b>' + num(g.billed_above) + ' min</b>'
-    + ' &middot; audio <b>' + on(g.audio) + '</b>'
-    + ' &middot; cooldown <b>' + num(g.cooldown) + 's</b>'
-    + ' &middot; retention <b>' + num(g.db_retention_days) + 'd</b>'
-    + ' &middot; workers <b>' + num(g.max_workers) + '</b>';
+  const items = [
+    ['customers', num(currentWatch.length)],
+    ['interval', num(g.check_interval) + 's'],
+    ['margin', num(g.margin_below) + ' to ' + num(g.margin_above) + '%'],
+    ['deadband', num(g.margin_deadband) + '%'],
+    ['billed above', num(g.billed_above) + ' min'],
+    ['audio', g.audio ? 'on' : 'off'],
+    ['cooldown', num(g.cooldown) + 's'],
+    ['retention', num(g.db_retention_days) + 'd'],
+    ['workers', num(g.max_workers)],
+  ];
+  $('config-summary').innerHTML = items.map(function (it) {
+    return '<div class="ro"><span class="ro-k">' + esc(it[0]) + '</span><span class="ro-v">'
+      + esc(it[1]) + '</span></div>';
+  }).join('');
 }
 
 function collectSettings() {
@@ -444,126 +757,174 @@ function renderSettings(data) {
   clearDirty();
 }
 
+function chip(kind, label) {
+  return '<span class="chip ' + kind + '">' + esc(label) + '</span>';
+}
+
 function renderStatus(s) {
-  $('s-alive').innerHTML = s.alive
-    ? '<b style="color:var(--green)">&#9679; LIVE</b>' : '<b style="color:var(--red)">&#9679; STOPPED</b>';
+  $('s-alive').innerHTML = s.alive ? chip('ok', 'running') : chip('alert', 'stopped');
   const up = s.uptime_seconds || 0;
   const h = Math.floor(up / 3600), m = Math.floor((up % 3600) / 60), sec = Math.floor(up % 60);
   $('s-uptime').textContent = (h ? h + 'h ' : '') + (m ? m + 'm ' : '') + sec + 's';
   $('s-cycle').textContent = s.cycle_count;
   $('s-last').textContent = s.last_check || '--';
-  $('s-errors').innerHTML = s.error_count ? '<b style="color:var(--red)">' + s.error_count + '</b>' : '0';
-  $('s-version').textContent = s.settings_version;
+  $('s-errors').textContent = s.error_count || 0;
+  $('s-errors').className = 'ro-v' + (s.error_count ? ' alert' : '');
+  $('s-version').textContent = 'v' + s.settings_version;
+
   knownCustomers = s.customers || [];
   $('customer-options').innerHTML = knownCustomers.map(function (c) {
     return '<option value="' + esc(c.customer_id) + '">' + esc(c.name || '') + '</option>';
   }).join('');
+
   const sel = $('hist-customer');
   const keep = sel.value;
   sel.innerHTML = '<option value="">All customers</option>' + knownCustomers.map(function (c) {
-    return '<option value="' + esc(c.customer_id) + '">' + esc(c.customer_id + (c.name ? ' - ' + c.name : '')) + '</option>';
+    return '<option value="' + esc(c.customer_id) + '">' + esc(c.customer_id)
+      + (c.name ? ' - ' + c.name : '') + '</option>';
   }).join('');
   if ([...sel.options].some(function (o) { return o.value === keep; })) sel.value = keep;
+
   renderLiveStatus(s);
 }
 
-function cell(v, digits) {
-  if (v === null || v === undefined || v === '') return '<span class="muted">--</span>';
+function numCell(v, digits) {
+  if (v === null || v === undefined || v === '') return '<span style="color:var(--faint)">--</span>';
   const n = Number(v);
-  return Number.isFinite(n) ? n.toFixed(digits === undefined ? 2 : digits) : esc(v);
+  if (!Number.isFinite(n)) return esc(v);
+  const txt = n.toFixed(digits === undefined ? 2 : digits);
+  return n < 0 ? '<span class="neg">' + txt + '</span>' : txt;
+}
+
+function table(headers, rows) {
+  let head = '<tr>' + headers.map(function (h) {
+    return '<th' + (h.num ? ' class="num"' : '') + '>' + esc(h.label) + '</th>';
+  }).join('') + '</tr>';
+  if (!rows.length) return '';
+  return '<div class="table-wrap"><table><thead>' + head + '</thead><tbody>'
+    + rows.join('') + '</tbody></table></div>';
 }
 
 function renderLiveStatus(s) {
-  const rows = s.customers || [];
-  if (!rows.length) { $('live-status').innerHTML = '<div class="empty">No data yet.</div>'; return; }
-  let html = '<table><thead><tr><th>ID</th><th>Name</th><th class="num">Balance</th><th class="num">Credit</th>'
-    + '<th class="num">Remaining</th><th class="num">Margin %</th><th class="num">Billed min</th>'
-    + '<th>Monitored</th><th>Alert</th><th>Error</th></tr></thead><tbody>';
-  for (const c of rows) {
-    const state = c.margin_state || c.balance_state ? '<span style="color:var(--red)">ALERT</span>' : '<span class="muted">ok</span>';
-    html += '<tr><td>' + esc(c.customer_id) + '</td><td>' + esc(c.name || '--') + '</td>'
-      + '<td class="num">' + cell(c.balance, 4) + '</td>'
-      + '<td class="num">' + cell(c.credit_limit) + '</td>'
-      + '<td class="num">' + cell(c.remaining) + '</td>'
-      + '<td class="num">' + cell(c.margin, 1) + '</td>'
-      + '<td class="num">' + cell(c.billed_min, 1) + '</td>'
-      + '<td>' + (c.monitored ? 'yes' : '<span class="muted">no</span>') + '</td>'
-      + '<td>' + state + '</td>'
-      + '<td>' + (c.error ? '<span style="color:var(--red)">' + esc(c.error) + '</span>' : '<span class="muted">--</span>') + '</td></tr>';
+  const rows = (s.customers || []).map(function (c) {
+    const alerting = c.margin_state || c.balance_state;
+    return '<tr><td class="mono">' + esc(c.customer_id) + '</td>'
+      + '<td class="wide">' + esc(c.name || '--') + '</td>'
+      + '<td class="num">' + numCell(c.balance, 2) + '</td>'
+      + '<td class="num">' + numCell(c.credit_limit, 2) + '</td>'
+      + '<td class="num">' + numCell(c.remaining, 2) + '</td>'
+      + '<td class="num">' + numCell(c.margin, 1) + '</td>'
+      + '<td class="num">' + numCell(c.billed_min, 0) + '</td>'
+      + '<td>' + (c.monitored ? chip('ok', 'yes') : chip('nodot', 'no')) + '</td>'
+      + '<td>' + (alerting ? chip('alert', 'alert') : chip('ok', 'ok')) + '</td>'
+      + '<td class="wide">' + (c.error
+        ? '<span style="color:var(--err)">' + esc(c.error) + '</span>'
+        : '<span style="color:var(--faint)">none</span>') + '</td></tr>';
+  });
+  if (!rows.length) {
+    $('live-status').innerHTML = '<div class="state">Waiting for the first cycle. Readings appear here after the monitor checks a customer.</div>';
+    return;
   }
-  $('live-status').innerHTML = html + '</tbody></table>';
+  $('live-status').innerHTML = table([
+    { label: 'ID' }, { label: 'Name' }, { label: 'Balance', num: true }, { label: 'Credit', num: true },
+    { label: 'Remaining', num: true }, { label: 'Margin %', num: true }, { label: 'Billed min', num: true },
+    { label: 'Monitored' }, { label: 'Alert' }, { label: 'Last error' },
+  ], rows);
 }
 
 function renderAlerts(list) {
-  if (!list.length) { $('live-alerts').innerHTML = '<div class="empty">No alert state recorded.</div>'; return; }
-  let html = '<table><thead><tr><th>Customer</th><th>Type</th><th>State</th><th class="num">Count</th>'
-    + '<th>Direction</th><th>Last alerted</th></tr></thead><tbody>';
-  for (const a of list) {
-    html += '<tr><td>' + esc(a.customer_id) + '</td><td>' + esc(a.alert_type) + '</td>'
-      + '<td>' + (a.state ? '<span style="color:var(--red)">ALERT</span>' : '<span class="muted">ok</span>') + '</td>'
-      + '<td class="num">' + esc(a.alert_count) + '</td><td>' + esc(a.direction || '--') + '</td>'
-      + '<td>' + esc(a.last_alerted_at || '--') + '</td></tr>';
+  const rows = (list || []).map(function (a) {
+    return '<tr><td class="mono">' + esc(a.customer_id) + '</td>'
+      + '<td>' + esc(a.alert_type) + '</td>'
+      + '<td>' + (a.state ? chip('alert', 'alerting') : chip('nodot', 'clear')) + '</td>'
+      + '<td class="num">' + esc(a.alert_count) + '</td>'
+      + '<td>' + esc(a.direction || '--') + '</td>'
+      + '<td class="mono">' + esc(a.last_alerted_at || '--') + '</td></tr>';
+  });
+  if (!rows.length) {
+    $('live-alerts').innerHTML = '<div class="state">No alert state recorded. Alerts appear when a threshold is crossed.</div>';
+    return;
   }
-  $('live-alerts').innerHTML = html + '</tbody></table>';
+  $('live-alerts').innerHTML = table([
+    { label: 'Customer' }, { label: 'Type' }, { label: 'State' },
+    { label: 'Count', num: true }, { label: 'Direction' }, { label: 'Last alerted' },
+  ], rows);
 }
 
 async function loadHistory() {
   const cid = $('hist-customer').value;
   const hours = $('hist-hours').value;
-  const url = '/api/history?hours=' + encodeURIComponent(hours) + (cid ? '&customer_id=' + encodeURIComponent(cid) : '');
+  const url = '/api/history?hours=' + encodeURIComponent(hours)
+    + (cid ? '&customer_id=' + encodeURIComponent(cid) : '');
   try {
     const data = await (await fetch(url)).json();
-    if (!data.ok) throw new Error(data.error || 'history unavailable');
+    if (!data.ok) throw new Error(data.error || 'History unavailable');
     renderHistoryTable('hist-balance', data.balance,
-      ['recorded_at','customer_id','balance','credit_limit','remaining'],
-      ['Time','Customer','Balance','Credit','Remaining'], 3);
+      [{ key: 'recorded_at', label: 'Time', mono: true }, { key: 'customer_id', label: 'Customer', mono: true },
+       { key: 'balance', label: 'Balance', num: true, digits: 2 },
+       { key: 'credit_limit', label: 'Credit', num: true, digits: 2 },
+       { key: 'remaining', label: 'Remaining', num: true, digits: 2 }]);
     renderHistoryTable('hist-margin', data.margin,
-      ['recorded_at','customer_id','margin','billed_min'],
-      ['Time','Customer','Margin %','Billed min'], 2);
+      [{ key: 'recorded_at', label: 'Time', mono: true }, { key: 'customer_id', label: 'Customer', mono: true },
+       { key: 'margin', label: 'Margin %', num: true, digits: 1 },
+       { key: 'billed_min', label: 'Billed min', num: true, digits: 0 }]);
   } catch (e) {
-    $('hist-balance').innerHTML = '<div class="empty">' + esc(e.message) + '</div>';
-    $('hist-margin').innerHTML = '<div class="empty">&ndash;</div>';
+    $('hist-balance').innerHTML = '<div class="state">' + esc(e.message) + '</div>';
+    $('hist-margin').innerHTML = '<div class="state">Unavailable.</div>';
   }
 }
 
-function renderHistoryTable(target, rows, keys, heads, digits) {
-  if (!rows || !rows.length) { $(target).innerHTML = '<div class="empty">No records.</div>'; return; }
-  let html = '<table><thead><tr>' + heads.map(function (h, i) {
-    return '<th' + (i >= 2 ? ' class="num"' : '') + '>' + esc(h) + '</th>';
-  }).join('') + '</tr></thead><tbody>';
-  for (const r of rows.slice(0, 200)) {
-    html += '<tr>' + keys.map(function (k, i) {
-      if (i >= 2) return '<td class="num">' + cell(r[k], digits) + '</td>';
-      return '<td>' + esc(r[k]) + '</td>';
-    }).join('') + '</tr>';
+function renderHistoryTable(target, rows, cols) {
+  if (!rows || !rows.length) {
+    $(target).innerHTML = '<div class="state">No samples in this window.</div>';
+    return;
   }
-  $(target).innerHTML = html + '</tbody></table>';
+  const headers = cols.map(function (c) {
+    return { label: c.label, num: !!c.num };
+  });
+  const body = rows.slice(0, 200).map(function (r) {
+    return '<tr>' + cols.map(function (c) {
+      const cls = c.num ? 'num' : (c.mono ? 'mono' : '');
+      const val = c.num ? numCell(r[c.key], c.digits) : esc(r[c.key]);
+      return '<td' + (cls ? ' class="' + cls + '"' : '') + '>' + val + '</td>';
+    }).join('') + '</tr>';
+  });
+  $(target).innerHTML = table(headers, body);
 }
 
 async function loadStatus() {
-  try { renderStatus(await (await fetch('/api/status')).json()); }
-  catch (e) { $('s-alive').innerHTML = '<b style="color:var(--red)">&#9679; OFFLINE</b>'; }
+  try {
+    renderStatus(await (await fetch('/api/status')).json());
+  } catch (e) {
+    $('s-alive').innerHTML = chip('alert', 'offline');
+  }
 }
 
 async function loadLive() {
-  try { renderAlerts((await (await fetch('/api/alerts')).json()).alerts || []); }
-  catch (e) { $('live-alerts').innerHTML = '<div class="empty">Alerts unavailable.</div>'; }
+  try {
+    renderAlerts((await (await fetch('/api/alerts')).json()).alerts || []);
+  } catch (e) {
+    $('live-alerts').innerHTML = '<div class="state">Alerts unavailable.</div>';
+  }
   loadHistory();
 }
 
 async function loadSettings() {
   try {
     const data = await (await fetch('/api/settings')).json();
-    if (!data.ok) { $('global-fields').innerHTML = '<div class="empty">' + esc(data.error || 'Unavailable') + '</div>'; return; }
+    if (!data.ok) {
+      $('global-fields').innerHTML = '<div class="state">' + esc(data.error || 'Settings unavailable') + '</div>';
+      return;
+    }
     renderSettings(data);
   } catch (e) {
-    $('global-fields').innerHTML = '<div class="empty">Failed to load settings.</div>';
+    $('global-fields').innerHTML = '<div class="state">Failed to load settings.</div>';
   }
 }
 
 async function saveSettings() {
   const payload = collectSettings();
-  $('settings-status').innerHTML = '<span class="muted">Saving&hellip;</span>';
+  $('settings-status').innerHTML = '<div class="notice">Saving&hellip;</div>';
   try {
     const resp = await fetch('/api/settings', {
       method: 'POST',
@@ -574,24 +935,37 @@ async function saveSettings() {
     if (!resp.ok || !data.ok) {
       const banner = applyFieldErrors(data.field_errors || []);
       const extra = (data.errors || []).filter(function (m) { return banner.indexOf(m) === -1; });
-      let html = '<div class="errmsg"><b>Not saved:</b>';
-      if (extra.length) html += '<ul>' + extra.map(function (e) { return '<li>' + esc(e) + '</li>'; }).join('') + '</ul>';
-      if (banner.length) html += '<ul>' + banner.map(function (e) { return '<li>' + esc(e) + '</li>'; }).join('') + '</ul>';
+      let html = '<div class="notice err"><b>Not saved.</b> Fix the highlighted fields.';
+      if (extra.length) {
+        html += '<ul>' + extra.map(function (e) { return '<li>' + esc(e) + '</li>'; }).join('') + '</ul>';
+      }
       $('settings-status').innerHTML = html + '</div>';
       return;
     }
     clearFieldErrors();
-    let msg = '<div class="okmsg">Saved &mdash; applying within ~1s.</div>';
+    let html = '<div class="notice ok"><b>Saved.</b> Applied within about a second.</div>';
     if (data.warnings && data.warnings.length) {
-      msg += '<div class="warnmsg">' + data.warnings.map(function (w) { return esc(w); }).join('<br>') + '</div>';
+      html += '<div class="notice warn">'
+        + data.warnings.map(function (w) { return esc(w); }).join('<br>') + '</div>';
     }
-    $('settings-status').innerHTML = msg;
+    $('settings-status').innerHTML = html;
     renderSettings(data);
     loadStatus();
   } catch (e) {
-    $('settings-status').innerHTML = '<div class="errmsg">Save failed: ' + esc(e) + '</div>';
+    $('settings-status').innerHTML = '<div class="notice err">Save failed: ' + esc(e) + '</div>';
   }
 }
+
+document.querySelectorAll('.tab').forEach(function (btn) {
+  btn.addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+      e.preventDefault();
+      const next = activeTab === 'settings' ? 'live' : 'settings';
+      showTab(next);
+      $('tabbtn-' + next).focus();
+    }
+  });
+});
 
 window.addEventListener('beforeunload', function (e) {
   if (dirty) { e.preventDefault(); e.returnValue = ''; }
@@ -599,6 +973,7 @@ window.addEventListener('beforeunload', function (e) {
 
 loadStatus();
 loadSettings();
+if (location.hash === '#live') showTab('live');
 setInterval(function () { loadStatus(); if (activeTab === 'live') loadLive(); }, REFRESH * 1000);
 </script>
 </body>
