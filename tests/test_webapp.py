@@ -31,8 +31,10 @@ def _fetch_json(url: str) -> tuple[int, dict]:
         return response.status, json.loads(response.read().decode("utf-8"))
 
 
-def _post_json(url: str, payload: object, headers: dict | None = None) -> tuple[int, dict]:
+def _post_json(url: str, payload: object, headers: dict | None = None, token: str | None = None) -> tuple[int, dict]:
     request_headers = {"Content-Type": "application/json"}
+    if token is not None:
+        request_headers["X-CSRF-Token"] = token
     if headers:
         request_headers.update(headers)
     request = urllib.request.Request(
@@ -91,9 +93,9 @@ class TestMonitorState:
 
 
 class TestDashboard:
-    def _settings(self, port: int = 0) -> Settings:
+    def _settings(self, port: int = 0, host: str = "127.0.0.1") -> Settings:
         return Settings(
-            global_=GlobalSettings(web_dashboard=True, web_dashboard_port=port),
+            global_=GlobalSettings(web_dashboard=True, web_dashboard_host=host, web_dashboard_port=port),
             watch=[WatchTarget(customer="18", balance_below=-500.0)],
         )
 
@@ -103,6 +105,14 @@ class TestDashboard:
             watch=[WatchTarget(customer="18", balance_below=-500.0)],
         )
         assert create_dashboard(MonitorState(), settings) is None
+
+    def test_non_loopback_host_falls_back_to_localhost(self) -> None:
+        handle = create_dashboard(MonitorState(), self._settings(host="0.0.0.0"))
+        assert handle is not None
+        try:
+            assert handle.url.startswith("http://127.0.0.1:")
+        finally:
+            handle.stop()
 
     def test_endpoints(self, temp_db: str) -> None:
         persistence.insert_balance(
@@ -138,6 +148,8 @@ class TestDashboard:
             with urllib.request.urlopen(base + "/", timeout=5) as response:
                 html = response.read().decode("utf-8")
             assert "InstacallMonitor" in html
+            assert "Live" in html
+            assert 'name="csrf-token"' in html
         finally:
             handle.stop()
 
@@ -158,6 +170,17 @@ class TestDashboard:
             status, data = _fetch_json(handle.url + "/api/history?customer_id=18&hours=99999999")
             assert status == 200
             assert data["ok"] is True
+        finally:
+            handle.stop()
+
+    def test_history_limit_clamped(self, temp_db: str) -> None:
+        handle = create_dashboard(MonitorState(), self._settings())
+        assert handle is not None
+        try:
+            for limit in ("999999", "0", "-5", "notanint"):
+                status, data = _fetch_json(handle.url + "/api/history?limit=" + limit)
+                assert status == 200, limit
+                assert data["ok"] is True, limit
         finally:
             handle.stop()
 
@@ -190,13 +213,14 @@ class TestSettingsEditor:
         payload["settings"]["web_dashboard_port"] = int(handle.url.rsplit(":", 1)[1])
         return payload
 
-    def test_get_settings(self, temp_settings: Path) -> None:
+    def test_get_settings_is_flat(self, temp_settings: Path) -> None:
         handle = self._start(MonitorState())
         try:
             status, data = _fetch_json(handle.url + "/api/settings")
             assert status == 200
-            assert data["settings"]["settings"]["margin_below"] == 30.0
-            assert data["settings"]["watch"][0]["customer"] == "18"
+            assert data["ok"] is True
+            assert data["settings"]["margin_below"] == 30.0
+            assert data["watch"][0]["customer"] == "18"
         finally:
             handle.stop()
 
@@ -206,11 +230,29 @@ class TestSettingsEditor:
         try:
             payload = self._payload(handle)
             payload["settings"]["margin_below"] = 22.0
-            status, data = _post_json(handle.url + "/api/settings", payload)
+            status, data = _post_json(handle.url + "/api/settings", payload, token=handle.csrf_token)
             assert status == 200
             assert data["ok"] is True
             assert state.reload_requested() is True
             assert config.read_settings().global_.margin_below == 22.0
+        finally:
+            handle.stop()
+
+    def test_post_without_csrf_rejected(self, temp_settings: Path) -> None:
+        handle = self._start(MonitorState())
+        try:
+            status, data = _post_json(handle.url + "/api/settings", self._payload(handle))
+            assert status == 403
+            assert data["ok"] is False
+            assert config.read_settings().global_.margin_below == 30.0
+        finally:
+            handle.stop()
+
+    def test_post_with_wrong_csrf_rejected(self, temp_settings: Path) -> None:
+        handle = self._start(MonitorState())
+        try:
+            status, _ = _post_json(handle.url + "/api/settings", self._payload(handle), token="wrong-token")
+            assert status == 403
         finally:
             handle.stop()
 
@@ -219,10 +261,12 @@ class TestSettingsEditor:
         try:
             payload = self._payload(handle)
             payload["settings"]["margin_below"] = 90.0
-            status, data = _post_json(handle.url + "/api/settings", payload)
+            status, data = _post_json(handle.url + "/api/settings", payload, token=handle.csrf_token)
             assert status == 400
             assert data["ok"] is False
             assert data["errors"]
+            assert data["field_errors"]
+            assert any(fe["field"] == "margin_above" for fe in data["field_errors"])
             assert config.read_settings().global_.margin_below == 30.0
         finally:
             handle.stop()
@@ -230,7 +274,12 @@ class TestSettingsEditor:
     def test_post_wrong_content_type_rejected(self, temp_settings: Path) -> None:
         handle = self._start(MonitorState())
         try:
-            status, _ = _post_json(handle.url + "/api/settings", self._payload(handle), {"Content-Type": "text/plain"})
+            status, _ = _post_json(
+                handle.url + "/api/settings",
+                self._payload(handle),
+                {"Content-Type": "text/plain"},
+                token=handle.csrf_token,
+            )
             assert status == 415
         finally:
             handle.stop()
@@ -239,7 +288,10 @@ class TestSettingsEditor:
         handle = self._start(MonitorState())
         try:
             status, _ = _post_json(
-                handle.url + "/api/settings", self._payload(handle), {"Origin": "http://evil.example"}
+                handle.url + "/api/settings",
+                self._payload(handle),
+                {"Origin": "http://evil.example"},
+                token=handle.csrf_token,
             )
             assert status == 403
         finally:
@@ -250,7 +302,7 @@ class TestSettingsEditor:
         try:
             payload = self._payload(handle)
             payload["settings"]["web_dashboard_port"] = 65000
-            status, data = _post_json(handle.url + "/api/settings", payload)
+            status, data = _post_json(handle.url + "/api/settings", payload, token=handle.csrf_token)
             assert status == 200
             assert any("restart" in w.lower() for w in data["warnings"])
         finally:
@@ -261,17 +313,19 @@ class TestSettingsEditor:
         try:
             payload = self._payload(handle)
             payload["settings"]["web_dashboard_host"] = ""
-            status, data = _post_json(handle.url + "/api/settings", payload)
+            status, data = _post_json(handle.url + "/api/settings", payload, token=handle.csrf_token)
             assert status == 400
             assert any("web_dashboard_host" in e for e in data["errors"])
         finally:
             handle.stop()
 
-    def test_get_settings_includes_ok(self, temp_settings: Path) -> None:
+    def test_non_loopback_host_rejected_on_save(self, temp_settings: Path) -> None:
         handle = self._start(MonitorState())
         try:
-            status, data = _fetch_json(handle.url + "/api/settings")
-            assert status == 200
-            assert data["ok"] is True
+            payload = self._payload(handle)
+            payload["settings"]["web_dashboard_host"] = "0.0.0.0"
+            status, data = _post_json(handle.url + "/api/settings", payload, token=handle.csrf_token)
+            assert status == 400
+            assert any(fe["field"] == "web_dashboard_host" for fe in data["field_errors"])
         finally:
             handle.stop()

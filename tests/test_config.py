@@ -334,6 +334,14 @@ class TestValidateHardening:
         errors = validate_settings(self._settings(web_dashboard_host="127.0.0.1\n"))
         assert any("web_dashboard_host" in e for e in errors)
 
+    def test_non_loopback_host_rejected(self) -> None:
+        errors = validate_settings(self._settings(web_dashboard_host="0.0.0.0"))
+        assert any("loopback" in e for e in errors)
+
+    def test_loopback_hosts_accepted(self) -> None:
+        for host in ("127.0.0.1", "localhost", "::1"):
+            assert validate_settings(self._settings(web_dashboard_host=host)) == []
+
     def test_negative_retry_base_delay_rejected(self) -> None:
         errors = validate_settings(self._settings(retry_base_delay=-1.0))
         assert any("retry_base_delay" in e for e in errors)

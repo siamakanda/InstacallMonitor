@@ -90,36 +90,46 @@ Installing the project (`pip install .`) also exposes the same interface as the
 
 ## Web Dashboard
 
-A dependency-free settings page (Python stdlib only) starts automatically alongside the monitor. It binds
-to `127.0.0.1:8765` by default and mirrors the TUI: a live status strip (alive, uptime, cycles, errors,
-settings version), a config summary line, an editor for every global setting, and a table of
-balance-check customers.
+A dependency-free dashboard (Python stdlib only) starts automatically alongside the monitor. It binds to
+`127.0.0.1:8765` and has two tabs:
+
+- **Settings** — a status strip (alive, uptime, cycles, errors, settings version), a config summary, an
+  editor for every global setting, and the balance-check customer table.
+- **Live** — current balances/margins per customer, a history view (customer + time window) backed by the
+  SQLite history, and the alert-state table.
 
 ```
 Dashboard  http://127.0.0.1:8765
 ```
 
 Configure or disable it in `settings.toml` (`web_dashboard`, `web_dashboard_host`, `web_dashboard_port`,
-`web_dashboard_refresh`) or via `--no-web` / `--web-port N`. It binds to localhost by default — if you
-expose it beyond localhost, put it behind your own auth/proxy.
+`web_dashboard_refresh`) or via `--no-web` / `--web-port N`. It is **loopback-only**: a non-loopback
+`web_dashboard_host` (e.g. `0.0.0.0`) is rejected at startup and falls back to `127.0.0.1`. The dashboard
+has no authentication, so do not put it behind a public proxy.
 
 ### Editing settings
 
 Everything is edited in place:
 
-- **Settings** — every global value, grouped (General, Thresholds, Sirens, Resilience, Dashboard).
+- **Settings** — every global value, grouped (General, Thresholds, Sirens, Resilience, Dashboard). Invalid
+  values are underlined with the specific error shown under the field.
 - **Balance-check customers** — an input + dropdown table. Pick a known customer from the list or type an
-  ID, set `balance_below` (required) and any per-customer overrides, then add or remove rows.
+  ID, set `balance_below` (required) and any per-customer overrides, then add or remove rows. Override
+  inputs show the global default as a placeholder and are marked when overridden. Removing a row asks for
+  confirmation; Add rejects empty or duplicate customer IDs.
+- **Unsaved-changes guard** — Save stays disabled until something changes, and the browser warns before
+  leaving with unsaved edits.
 
 Saving writes `settings.toml` (keeping a `settings.toml.bak` copy and the file's comments), validates the
 values first, and wakes the monitor so hot-reload applies them within about a second — no restart needed,
 except for a changed dashboard host/port (shown as a warning).
 
-Writes go through `POST /api/settings`, which requires a JSON content type and same-origin requests, so a
-random web page in your browser cannot silently rewrite your config.
+Writes go through `POST /api/settings`, which requires a JSON content type, a same-origin request, and the
+page's CSRF token (`X-CSRF-Token`), so another web page in your browser cannot silently rewrite your config.
 
 The JSON endpoints it serves can also be scraped directly: `/api/status`, `/api/customers`,
-`/api/history?customer_id=ID&hours=24`, `/api/alerts`, and `GET`/`POST /api/settings`.
+`/api/history?customer_id=ID&hours=24&limit=500`, `/api/alerts`, and `GET`/`POST /api/settings`.
+`GET /api/settings` returns `{"ok": true, "settings": {…global…}, "watch": […]}`.
 
 ## Console Output
 
@@ -231,12 +241,13 @@ InstacallMonitor/
   notify.py             — Desktop notifications
   audio.py              — Tone-sequence model + cached WAV rendering + cross-platform playback
   webapp.py             — Stdlib HTTP dashboard: live state, JSON API, settings editor
+  dashboard_ui.py       — The dashboard page (HTML/CSS/JS, stdlib-only)
   display.py            — Console formatting, ANSI colors, [B]/[M] prefixes
   persistence.py        — SQLite ORM (balance, margin, alert_state tables), CSV export
   circuit_breaker.py    — Circuit breaker pattern for resilient HTTP requests
   settings.toml         — Runtime configuration (global + per-customer overrides)
   .env                  — Portal credentials (never committed)
-  tests/                — 195 pytest tests
+  tests/                — 210 pytest tests
 ```
 
 ## Files (Runtime)

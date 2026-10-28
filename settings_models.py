@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import math
 from dataclasses import dataclass, field, fields
 from typing import Any, Optional, TypeGuard, get_type_hints
@@ -40,6 +41,17 @@ def is_number(value: object) -> TypeGuard[int | float]:
 
 def is_finite_number(value: object) -> TypeGuard[int | float]:
     return is_number(value) and math.isfinite(float(value))
+
+
+def is_loopback_host(host: str) -> bool:
+    """True for 127.0.0.0/8, ::1 and the name 'localhost'."""
+    candidate = host.strip().lower()
+    if candidate == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(candidate).is_loopback
+    except ValueError:
+        return False
 
 
 @dataclass

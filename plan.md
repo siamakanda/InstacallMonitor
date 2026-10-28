@@ -50,6 +50,24 @@ install + `instacallmonitor` console script verified, coverage config valid (66%
 
 Test suite: → 195 tests.
 
+---
+
+## Dashboard improvements (done)
+
+- **Security**: loopback-only binding (a non-loopback `web_dashboard_host` is rejected by validation and
+  falls back to `127.0.0.1` at bind time); per-dashboard CSRF token required on `POST` (`X-CSRF-Token`);
+  flat `GET /api/settings` shape; `/api/history` gains a clamped `limit` param.
+- **Editing UX**: `settings_validation` now emits structured `FieldError`s (`validate_settings_detailed`)
+  that drive **inline per-field errors**; override inputs show the global default as a placeholder and are
+  marked when set; remove asks for confirmation; Add rejects empty/duplicate customer ids; unsaved-changes
+  guard (Save disabled until dirty, `beforeunload` warning).
+- **Live tab**: current balances/margins, history (customer + time window), and alert states — on top of
+  the existing endpoints.
+- **Structure**: the page moved to `dashboard_ui.py` (`render_page`), leaving `webapp.py` as HTTP/API only.
+  `validate_settings()` still returns the same message strings, so existing callers/tests are unchanged.
+
+Test suite: → 210 tests.
+
 Phase 1 changes landed in: `settings_models` coercion / `fmt_val`, `config.save_settings`
 escaping, `circuit_breaker` half-open self-heal, `scraper_client` breaker accounting + retry
 delay + re-login lock + URL-encoded ids, `auth.perform_login` verification, `audio` bounded
