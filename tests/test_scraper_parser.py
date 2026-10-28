@@ -107,3 +107,15 @@ class TestParserHardening:
         assert results is not None
         assert results["18"]["name"] == "First"
         assert results["18"]["billed_min"] == 100.0
+
+    def test_non_finite_balance_rejected(self) -> None:
+        for value in ("nan", "inf", "-inf"):
+            html = f"<html><body><input name='name' value='Acme'/><input name='balance' value='{value}'/></body></html>"
+            _, balance, _, error = parse_customer_page(html)
+            assert balance is None
+            assert "non-numeric balance" in (error or "")
+
+    def test_summary_non_finite_margin_dropped(self) -> None:
+        results = parse_summary_page(_summary_html(_summary_row("Acme", "100", "nan%")))
+        assert results is not None
+        assert results["18"]["margin"] is None

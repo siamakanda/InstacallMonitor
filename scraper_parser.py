@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
 from typing import Optional, TypeGuard
 
@@ -57,6 +58,9 @@ def _parse_number(text: str) -> Optional[float]:
     try:
         value = float(cleaned)
     except ValueError:
+        return None
+    if not math.isfinite(value):
+        # Reject "nan"/"inf": they would silently defeat threshold comparisons.
         return None
     return -value if negative else value
 

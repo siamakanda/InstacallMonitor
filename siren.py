@@ -26,13 +26,16 @@ class SirenManager:
 
     @property
     def is_playing(self) -> bool:
-        return self._playing
+        with self._lock:
+            return self._playing
 
     def can_alert(self, customer_id: str, alert_type: str, cooldown: float) -> bool:
         with self._lock:
             key = f"{customer_id}:{alert_type}"
-            now = time.time()
-            last = self._timestamps.get(key, 0)
+            # Monotonic clock: wall-clock jumps (NTP/DST) must not suppress or
+            # spike alert cooldowns.
+            now = time.monotonic()
+            last = self._timestamps.get(key, 0.0)
             if now - last < cooldown:
                 return False
             self._timestamps[key] = now

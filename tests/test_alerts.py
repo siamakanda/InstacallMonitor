@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
+
+import siren
 from alerts import SirenManager, check_balance_alert, check_margin_alert
 from config import GlobalSettings, Settings, WatchTarget
 
@@ -35,6 +38,26 @@ class TestSirenManager:
         mgr = SirenManager()
         assert hasattr(mgr, "play_steady")
         assert callable(mgr.play_steady)
+
+    def test_cooldown_uses_monotonic_clock(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        mgr = SirenManager()
+        clock = {"t": 1000.0}
+        monkeypatch.setattr(siren.time, "monotonic", lambda: clock["t"])
+        monkeypatch.setattr(siren.time, "time", lambda: 0.0)  # wall clock frozen at epoch
+
+        assert mgr.can_alert("18", "balance", 300) is True
+        assert mgr.can_alert("18", "balance", 300) is False  # within the window
+        clock["t"] += 301
+        assert mgr.can_alert("18", "balance", 300) is True  # window elapsed on monotonic
+
+    def test_is_playing_reflects_acquire_release(self) -> None:
+        mgr = SirenManager()
+        assert mgr.is_playing is False
+        assert mgr.acquire() is True
+        assert mgr.is_playing is True
+        assert mgr.acquire() is False
+        mgr.release()
+        assert mgr.is_playing is False
 
 
 class TestMarginAlert:
@@ -162,6 +185,20 @@ class TestMarginAlert:
             mock_set.assert_called_once_with("18", "margin", 0, count=0, direction="")
             mock_siren.assert_not_called()
 
+    def test_non_finite_margin_does_not_trigger_recovery(self) -> None:
+        settings = self._make_settings()
+        mgr = SirenManager()
+
+        for margin in (float("nan"), float("inf")):
+            with (
+                patch("alerts.get_alert_state", return_value=(1, 1, "low")),
+                patch("alerts.set_alert_state") as mock_set,
+                patch("alerts._safe_notify") as mock_notify,
+            ):
+                check_margin_alert(mgr, "18", margin, 100.0, "TestCo", settings, monitored=True)
+                mock_set.assert_not_called()
+                mock_notify.assert_not_called()
+
 
 class TestBalanceAlert:
     def _settings(self, **kw) -> Settings:
@@ -219,3 +256,18 @@ class TestBalanceAlert:
         ):
             check_balance_alert(mgr, "18", -100.0, "TestCo", settings)
             mock_set.assert_called_with("18", "balance", 0, count=0)
+
+    def test_non_finite_balance_is_ignored(self) -> None:
+        settings = self._settings()
+        mgr = SirenManager()
+
+        for value in (float("nan"), float("inf")):
+            with (
+                patch("alerts.get_alert_state") as mock_get,
+                patch("alerts.set_alert_state") as mock_set,
+                patch("alerts._safe_notify") as mock_notify,
+            ):
+                check_balance_alert(mgr, "18", value, "TestCo", settings)
+                mock_notify.assert_not_called()
+                mock_set.assert_not_called()
+                mock_get.assert_not_called()

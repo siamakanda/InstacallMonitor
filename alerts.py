@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import threading
 from typing import Callable
 
@@ -157,6 +158,14 @@ def check_balance_alert(
     customer_name: str,
     settings: Settings,
 ) -> None:
+    if not math.isfinite(balance):
+        # NaN compares false against everything, so it would neither alert nor
+        # recover and could strand stale state. Skip rather than act on garbage.
+        logging.warning(
+            "Balance for %s (ID: %s) is not finite (%r); skipping alert check.", customer_name, customer_id, balance
+        )
+        return
+
     w = settings.get_watch(customer_id)
     threshold = w.resolve_balance_below()
     cooldown = settings.global_.cooldown
@@ -192,6 +201,18 @@ def check_margin_alert(
         state, _count, _direction = get_alert_state(customer_id, "margin")
         if state != 0:
             set_alert_state(customer_id, "margin", 0, count=0, direction="")
+        return
+
+    if not (math.isfinite(margin) and math.isfinite(billed_min)):
+        # A NaN margin would otherwise read as "no longer alerting" and trigger a
+        # spurious recovery, clearing a genuine alert.
+        logging.warning(
+            "Margin/billed for %s (ID: %s) is not finite (%r, %r); skipping alert check.",
+            customer_name,
+            customer_id,
+            margin,
+            billed_min,
+        )
         return
 
     g = settings.global_
