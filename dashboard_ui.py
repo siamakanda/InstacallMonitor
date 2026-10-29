@@ -9,6 +9,10 @@ quiet, legible; settings primary, live monitoring secondary.
 
 from __future__ import annotations
 
+import json
+
+from settings_models import FIELD_SPEC
+
 _PAGE_TEMPLATE = """<!doctype html>
 <html lang="en">
 <head>
@@ -421,35 +425,7 @@ const esc = v => String(v === null || v === undefined ? '' : v)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const num = v => (v === null || v === undefined || v === '') ? '--' : Number(v);
 
-const FIELDS = [
-  ['check_interval','Check interval (s)','General','int'],
-  ['request_timeout','Request timeout (s)','General','int'],
-  ['cooldown','Alert cooldown (s)','General','int'],
-  ['audio','Audio sirens','General','bool'],
-  ['summary_direction','Summary direction','General','select',['outbound','inbound']],
-  ['summary_interval','Summary interval','General','text'],
-  ['db_retention_days','DB retention (days)','General','int'],
-  ['max_workers','Max workers','General','int'],
-  ['margin_below','Margin below (%)','Thresholds','float'],
-  ['margin_above','Margin above (%)','Thresholds','float'],
-  ['margin_deadband','Margin deadband (%)','Thresholds','float'],
-  ['billed_above','Billed above (min)','Thresholds','float'],
-  ['siren_loops','Siren loops','Sirens','int'],
-  ['siren_min_freq','Siren min freq (Hz)','Sirens','int'],
-  ['siren_max_freq','Siren max freq (Hz)','Sirens','int'],
-  ['siren_step_freq','Siren step (Hz)','Sirens','int'],
-  ['siren_tone_duration','Tone duration (ms)','Sirens','int'],
-  ['retry_max_attempts','Retry attempts','Resilience','int'],
-  ['retry_base_delay','Retry base delay (s)','Resilience','float'],
-  ['retry_max_delay','Retry max delay (s)','Resilience','float'],
-  ['retry_jitter_max','Retry jitter (s)','Resilience','float'],
-  ['circuit_failure_threshold','Circuit threshold','Resilience','int'],
-  ['circuit_recovery_timeout','Circuit recovery (s)','Resilience','float'],
-  ['web_dashboard','Dashboard enabled','Dashboard','bool'],
-  ['web_dashboard_host','Dashboard host','Dashboard','text'],
-  ['web_dashboard_port','Dashboard port','Dashboard','int'],
-  ['web_dashboard_refresh','Refresh (s)','Dashboard','int'],
-];
+const FIELDS = %FIELDS%;
 const WATCH_KEYS = [
   ['customer','Customer'],
   ['name','Name'],
@@ -548,10 +524,14 @@ function watchPlaceholder(key) {
     ? '' : 'global ' + globalDefaults[key];
 }
 
-function renderWatch() {
+function renderCustomerOptions() {
   $('customer-options').innerHTML = knownCustomers.map(function (c) {
     return '<option value="' + esc(c.customer_id) + '">' + esc(c.name || '') + '</option>';
   }).join('');
+}
+
+function renderWatch() {
+  renderCustomerOptions();
 
   if (!currentWatch.length) {
     $('watch-rows').innerHTML = '<div class="state">No customers yet. <b>Add customer</b> to start '
@@ -674,7 +654,7 @@ function clearFieldErrors() {
     n.classList.remove('invalid');
     n.setAttribute('aria-invalid', 'false');
   });
-  document.querySelectorAll('.fielderr, .field-err, .cell-err').forEach(function (n) { n.textContent = ''; });
+  document.querySelectorAll('.field-err, .cell-err').forEach(function (n) { n.textContent = ''; });
 }
 
 function findWatchRow(customer) {
@@ -773,9 +753,7 @@ function renderStatus(s) {
   $('s-version').textContent = 'v' + s.settings_version;
 
   knownCustomers = s.customers || [];
-  $('customer-options').innerHTML = knownCustomers.map(function (c) {
-    return '<option value="' + esc(c.customer_id) + '">' + esc(c.name || '') + '</option>';
-  }).join('');
+  renderCustomerOptions();
 
   const sel = $('hist-customer');
   const keep = sel.value;
@@ -882,7 +860,7 @@ function renderHistoryTable(target, rows, cols) {
   const headers = cols.map(function (c) {
     return { label: c.label, num: !!c.num };
   });
-  const body = rows.slice(0, 200).map(function (r) {
+  const body = rows.slice(0, 500).map(function (r) {
     return '<tr>' + cols.map(function (c) {
       const cls = c.num ? 'num' : (c.mono ? 'mono' : '');
       const val = c.num ? numCell(r[c.key], c.digits) : esc(r[c.key]);
@@ -981,5 +959,14 @@ setInterval(function () { loadStatus(); if (activeTab === 'live') loadLive(); },
 """
 
 
+def _fields_json() -> str:
+    """Serialize the editable settings schema for the page's FIELDS constant."""
+    return json.dumps([[s.name, s.label, s.group, s.kind, list(s.options)] for s in FIELD_SPEC])
+
+
 def render_page(refresh: int, csrf_token: str) -> str:
-    return _PAGE_TEMPLATE.replace("%REFRESH%", str(max(int(refresh), 1))).replace("%CSRF%", csrf_token)
+    return (
+        _PAGE_TEMPLATE.replace("%FIELDS%", _fields_json())
+        .replace("%REFRESH%", str(max(int(refresh), 1)))
+        .replace("%CSRF%", csrf_token)
+    )

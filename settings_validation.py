@@ -4,11 +4,10 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
-from settings_models import Settings, is_finite_number, is_loopback_host
+from settings_models import Settings, is_finite_number
 
 _MAX_INTERVAL = 86400  # 1 day
 _MAX_TIMEOUT = 600  # 10 minutes
-_MAX_RECOVERY = 3600  # 1 hour
 _SUMMARY_INTERVAL_RE = re.compile(r"\d+[smhd]")
 
 
@@ -121,66 +120,6 @@ def validate_settings_detailed(settings: Settings) -> list[FieldError]:
     elif g.max_workers < 1:
         errors.append(FieldError("max_workers", f"max_workers must be >= 1 (got {g.max_workers})"))
 
-    if not is_finite_number(g.retry_max_attempts):
-        errors.append(
-            FieldError("retry_max_attempts", f"retry_max_attempts must be a number (got {g.retry_max_attempts!r})")
-        )
-    elif g.retry_max_attempts < 0:
-        errors.append(FieldError("retry_max_attempts", f"retry_max_attempts must be >= 0 (got {g.retry_max_attempts})"))
-    if not is_finite_number(g.retry_base_delay):
-        errors.append(FieldError("retry_base_delay", f"retry_base_delay must be a number (got {g.retry_base_delay!r})"))
-    elif g.retry_base_delay < 0:
-        errors.append(FieldError("retry_base_delay", f"retry_base_delay must be >= 0 (got {g.retry_base_delay})"))
-    if not is_finite_number(g.retry_max_delay):
-        errors.append(FieldError("retry_max_delay", f"retry_max_delay must be a number (got {g.retry_max_delay!r})"))
-    elif is_finite_number(g.retry_base_delay) and g.retry_max_delay < g.retry_base_delay:
-        errors.append(
-            FieldError(
-                "retry_max_delay",
-                f"retry_max_delay ({g.retry_max_delay}) must be >= retry_base_delay ({g.retry_base_delay})",
-            )
-        )
-    if not is_finite_number(g.retry_jitter_max):
-        errors.append(FieldError("retry_jitter_max", f"retry_jitter_max must be a number (got {g.retry_jitter_max!r})"))
-    elif g.retry_jitter_max < 0:
-        errors.append(FieldError("retry_jitter_max", f"retry_jitter_max must be >= 0 (got {g.retry_jitter_max})"))
-
-    if not is_finite_number(g.circuit_failure_threshold):
-        errors.append(
-            FieldError(
-                "circuit_failure_threshold",
-                f"circuit_failure_threshold must be a number (got {g.circuit_failure_threshold!r})",
-            )
-        )
-    elif g.circuit_failure_threshold < 1:
-        errors.append(
-            FieldError(
-                "circuit_failure_threshold",
-                f"circuit_failure_threshold must be >= 1 (got {g.circuit_failure_threshold})",
-            )
-        )
-    _check_interval(errors, "circuit_recovery_timeout", g.circuit_recovery_timeout, _MAX_RECOVERY)
-
-    if not is_finite_number(g.siren_loops):
-        errors.append(FieldError("siren_loops", f"siren_loops must be a number (got {g.siren_loops!r})"))
-    elif g.siren_loops < 0:
-        errors.append(FieldError("siren_loops", f"siren_loops must be >= 0 (got {g.siren_loops})"))
-    if not is_finite_number(g.siren_min_freq) or not is_finite_number(g.siren_max_freq):
-        errors.append(
-            FieldError(
-                "siren_min_freq",
-                f"siren_min_freq and siren_max_freq must be numbers (got {g.siren_min_freq!r}, {g.siren_max_freq!r})",
-            )
-        )
-    elif g.siren_max_freq <= g.siren_min_freq:
-        errors.append(
-            FieldError(
-                "siren_max_freq", f"siren_max_freq ({g.siren_max_freq}) must be > siren_min_freq ({g.siren_min_freq})"
-            )
-        )
-    _check_positive(errors, "siren_step_freq", g.siren_step_freq)
-    _check_positive(errors, "siren_tone_duration", g.siren_tone_duration)
-
     if not is_finite_number(g.web_dashboard_port):
         errors.append(
             FieldError("web_dashboard_port", f"web_dashboard_port must be a number (got {g.web_dashboard_port!r})")
@@ -200,17 +139,6 @@ def validate_settings_detailed(settings: Settings) -> list[FieldError]:
     elif g.web_dashboard_refresh <= 0:
         errors.append(
             FieldError("web_dashboard_refresh", f"web_dashboard_refresh must be > 0 (got {g.web_dashboard_refresh})")
-        )
-    if not isinstance(g.web_dashboard_host, str) or not g.web_dashboard_host.strip():
-        errors.append(FieldError("web_dashboard_host", "web_dashboard_host must be a non-empty string"))
-    elif any(ord(ch) < 32 for ch in g.web_dashboard_host):
-        errors.append(FieldError("web_dashboard_host", "web_dashboard_host must not contain control characters"))
-    elif not is_loopback_host(g.web_dashboard_host):
-        errors.append(
-            FieldError(
-                "web_dashboard_host",
-                "web_dashboard_host must be a loopback address (127.0.0.1, ::1 or localhost)",
-            )
         )
 
     return errors
@@ -253,10 +181,3 @@ def _check_interval(errors: list[FieldError], name: str, value: object, upper: i
         errors.append(FieldError(name, f"{name} must be > 0 (got {value})"))
     elif value > upper:
         errors.append(FieldError(name, f"{name} must be <= {upper} (got {value})"))
-
-
-def _check_positive(errors: list[FieldError], name: str, value: object) -> None:
-    if not is_finite_number(value):
-        errors.append(FieldError(name, f"{name} must be a number (got {value!r})"))
-    elif value <= 0:
-        errors.append(FieldError(name, f"{name} must be > 0 (got {value})"))

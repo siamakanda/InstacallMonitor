@@ -48,10 +48,7 @@ def parse_args(argv: list[str] | None = None) -> Args:
             try:
                 args[key] = caster(raw)
             except ValueError:
-                if token == "--tail":
-                    args[key] = 20
-                else:
-                    print(f"  {red('[WARN]')} Invalid value for {token}: {raw}")
+                print(f"  {red('[WARN]')} Invalid value for {token}: {raw}")
             i += 2
         elif token in _FLAGS:
             args[_FLAGS[token]] = True
@@ -83,7 +80,7 @@ def print_help() -> None:
     print("  --no-web             Disable the web dashboard")
     print("  --web-port N         Override the dashboard port")
     print("  --status             Show monitor health status and exit")
-    print("  --tail N             Show last N log entries and exit (default: 20)")
+    print("  --tail N             Show last N log entries and exit")
     print("  --help               Show this help")
     print()
     print("Settings in settings.toml  |  Credentials in .env")

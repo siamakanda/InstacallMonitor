@@ -6,12 +6,12 @@ import os
 import tempfile
 from typing import Any, Optional
 
-from config import LOG_FILE, get_settings_version
+from config import LOG_FILE, RUNTIME_DIR, get_settings_version
 from display import bold, dim, green, red
 from runtime import Runtime
 from settings_models import Settings
 
-STATUS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "monitor.status")
+STATUS_FILE = str(RUNTIME_DIR / "monitor.status")
 
 
 def write_status(runtime: Runtime, settings: Settings, path: str = STATUS_FILE) -> None:

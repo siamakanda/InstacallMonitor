@@ -12,7 +12,7 @@ from urllib.parse import parse_qs, urlparse
 import persistence
 from config import read_settings, save_settings
 from dashboard_ui import render_page
-from settings_models import Settings, is_loopback_host
+from settings_models import Settings
 from settings_validation import validate_settings_detailed
 
 
@@ -24,7 +24,6 @@ class MonitorState:
         self.alive = True
         self.cycle_count = 0
         self.last_check: Optional[str] = None
-        self.next_check: Optional[str] = None
         self.interval = 0
         self.error_count = 0
         self.last_error: Optional[str] = None
@@ -37,9 +36,6 @@ class MonitorState:
 
     def request_reload(self) -> None:
         self._reload_requested.set()
-
-    def reload_requested(self) -> bool:
-        return self._reload_requested.is_set()
 
     def clear_reload(self) -> None:
         self._reload_requested.clear()
@@ -61,7 +57,6 @@ class MonitorState:
                 "uptime_seconds": round(time.time() - self.started_at, 1),
                 "cycle_count": self.cycle_count,
                 "last_check": self.last_check,
-                "next_check": self.next_check,
                 "interval": self.interval,
                 "error_count": self.error_count,
                 "last_error": self.last_error,
@@ -173,11 +168,11 @@ def _apply_settings(payload: Any) -> tuple[int, dict[str, Any], Optional[Setting
     return 200, {"ok": True, "settings": data["settings"], "watch": data["watch"]}, settings
 
 
-def _settings_warnings(settings: Settings, bound_host: str, bound_port: int) -> list[str]:
+def _settings_warnings(settings: Settings, bound_port: int) -> list[str]:
     g = settings.global_
     warnings: list[str] = []
-    if (g.web_dashboard_host, g.web_dashboard_port) != (bound_host, bound_port):
-        warnings.append("Dashboard host/port change takes effect after restart.")
+    if g.web_dashboard_port != bound_port:
+        warnings.append("Dashboard port change takes effect after restart.")
     if not g.web_dashboard:
         warnings.append("Dashboard disabled; the current server keeps running until restart.")
     return warnings
@@ -210,8 +205,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
         elif parsed.path == "/api/status":
             _json_response(self, {"ok": True, **self.state.snapshot()})
-        elif parsed.path == "/api/customers":
-            _json_response(self, {"ok": True, "customers": self.state.snapshot()["customers"]})
         elif parsed.path == "/api/history":
             query = parse_qs(parsed.query)
             customer_id = query.get("customer_id", [None])[0]
@@ -290,7 +283,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         if settings is not None:
             self.state.request_reload()
-            body["warnings"] = _settings_warnings(settings, self.bound_host, self.bound_port)
+            body["warnings"] = _settings_warnings(settings, self.bound_port)
         _json_response(self, body, status)
 
     def _safe_error(self, message: str) -> None:
@@ -325,12 +318,8 @@ def create_dashboard(state: MonitorState, settings: Settings) -> Optional[Dashbo
     if not g.web_dashboard:
         return None
 
-    host = g.web_dashboard_host
-    if not is_loopback_host(host):
-        # The dashboard has no authentication: never expose it beyond this host.
-        logging.warning("Dashboard host %r is not a loopback address; binding to 127.0.0.1 instead.", host)
-        host = "127.0.0.1"
-
+    # The dashboard has no authentication: bind to loopback only.
+    host = "127.0.0.1"
     csrf_token = secrets.token_urlsafe(32)
     handler = type(
         "BoundDashboardHandler",

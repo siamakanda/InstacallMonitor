@@ -4,7 +4,7 @@ from typing import Optional
 
 import requests
 
-from config import GlobalSettings, Settings
+from config import Settings
 from scraper_client import ScraperClient, _is_transient
 from scraper_parser import (
     SUMMARY_COLUMN_MAP,
@@ -20,7 +20,6 @@ __all__ = [
     "ScraperClient",
     "SummaryDict",
     "_is_transient",
-    "configure_scrapers",
     "fetch_balance",
     "fetch_summary_report",
     "parse_customer_page",
@@ -28,10 +27,6 @@ __all__ = [
 ]
 
 _client = ScraperClient()
-
-
-def configure_scrapers(settings: GlobalSettings) -> None:
-    _client.configure(settings)
 
 
 def fetch_balance(session: requests.Session, customer_id: str, timeout: int = 10) -> BalanceResult:

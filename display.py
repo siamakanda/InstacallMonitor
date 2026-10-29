@@ -7,7 +7,7 @@ from typing import Optional
 
 _ANSI_RE = re.compile(r"\033\[[0-9;]*m")
 
-# Colour output only when writing to a terminal (override with set_colors_enabled).
+# Colour output only when writing to a terminal.
 COLORS_ENABLED: bool = sys.stdout.isatty()
 
 
@@ -27,11 +27,6 @@ def init() -> None:
     _configure_stdio()
     if sys.platform == "win32":
         os.system("")
-
-
-def set_colors_enabled(enabled: bool) -> None:
-    global COLORS_ENABLED
-    COLORS_ENABLED = enabled
 
 
 def _color(code: int, text: str) -> str:
@@ -93,10 +88,10 @@ def print_balance_line(
 def print_summary_line(
     data: dict[str, object],
     cid: str,
-    monitored: bool = False,
+    monitored: bool,
+    margin_below: float,
+    margin_above: float,
     ts: str = "",
-    margin_below: float = 30.0,
-    margin_above: float = 75.0,
 ) -> None:
     tag = yellow("[M]") if monitored else dim("[M]")
     ts_part = f"[{ts}] " if ts else ""

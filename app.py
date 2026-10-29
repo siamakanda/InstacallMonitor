@@ -26,19 +26,12 @@ from config import (
     validate_settings,
 )
 from cycles import process_balances, process_summary
-from display import bold, cyan, dim, green, print_balance_line, print_summary_line, red
+from display import bold, cyan, dim, green, red
 from health import render_status, render_tail, write_status
-from persistence import (
-    BalanceRecord,
-    MarginRecord,
-    init_db,
-    insert_balance,
-    insert_margin,
-    purge_old_records,
-)
+from persistence import init_db, purge_old_records
 from reporting import print_banner, print_dashboard_url, print_session_summary, run_export
 from runtime import Runtime
-from scrapers import BalanceResult, configure_scrapers, fetch_balance, fetch_summary_report
+from scrapers import BalanceResult, fetch_balance, fetch_summary_report
 from settings_diff import diff_settings
 from settings_models import Settings
 from webapp import MonitorState, create_dashboard
@@ -52,8 +45,6 @@ _RELOAD_GLOBAL_ATTRS = (
     "billed_above",
     "max_workers",
     "audio",
-    "circuit_failure_threshold",
-    "circuit_recovery_timeout",
 )
 
 
@@ -90,15 +81,11 @@ def _qprint(quiet: bool, *a, **kw) -> None:
         print(*a, **kw)
 
 
-def _sleep_interruptible(seconds: int, shutdown: threading.Event, wake: threading.Event | None = None) -> bool:
-    seconds = max(seconds, 1)
-    for _ in range(seconds):
-        if shutdown.is_set():
-            return True
-        if wake is not None and wake.is_set():
-            return True
+def _sleep_interruptible(seconds: int, shutdown: threading.Event, wake: threading.Event | None = None) -> None:
+    for _ in range(max(seconds, 1)):
+        if shutdown.is_set() or (wake is not None and wake.is_set()):
+            return
         time.sleep(1)
-    return False
 
 
 def _collect_balances(
@@ -122,76 +109,41 @@ def _collect_balances(
     return results
 
 
-def run_once(settings: Settings) -> None:
+def run_once(settings: Settings, quiet: bool = False) -> None:
+    """Run a single monitoring cycle through the same pipeline as the loop."""
     g = settings.global_
     session = auth.create_session()
     try:
         if not _login_with_spinner(session, g.request_timeout):
-            print("  Login failed.")
+            _qprint(quiet, "  Login failed.")
             return
         init_db()
-        configure_scrapers(g)
 
-        print()
-        print(f"  {bold('Quick Check')}  {dim(datetime.now().strftime('%H:%M:%S'))}")
-        print(f"  {dim('─' * 50)}")
+        state = MonitorState()
+        runtime = Runtime()
+        runtime.start()
+        mgr = SirenManager()
 
-        customer_ids = settings.customer_ids
+        _qprint(quiet)
+        _qprint(quiet, f"  {bold('Quick Check')}  {dim(datetime.now().strftime('%H:%M:%S'))}")
+        _qprint(quiet, f"  {dim('─' * 50)}")
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=g.max_workers) as executor:
-            results = _collect_balances(executor, session, customer_ids, g.request_timeout)
+            results = _collect_balances(executor, session, settings.customer_ids, g.request_timeout)
 
-        for cid in customer_ids:
-            name, balance, credit_limit, error = results.get(cid, (None, None, None, "no result"))
-            ts = datetime.now().strftime("%H:%M:%S")
-            print_balance_line(name or "N/A", cid, balance, credit_limit, error, ts=ts)
-            if balance is not None:
-                remaining = credit_limit + balance if credit_limit is not None else None
-                try:
-                    insert_balance(
-                        BalanceRecord(
-                            customer_id=cid,
-                            customer_name=name or "N/A",
-                            balance=balance,
-                            credit_limit=credit_limit,
-                            remaining=remaining,
-                        )
-                    )
-                except Exception as e:
-                    logging.error(f"DB insert balance failed for {cid}: {e}")
+        process_balances(results, mgr, settings, state, runtime, {})
 
-        print()
-        print(f"  {bold('Summary')}")
-        print(f"  {dim('─' * 50)}")
+        _qprint(quiet)
+        _qprint(quiet, f"  {bold('Summary')}")
+        _qprint(quiet, f"  {dim('─' * 50)}")
         summary, err = fetch_summary_report(session, settings)
         if summary:
-            for cid, data in summary.items():
-                ts = datetime.now().strftime("%H:%M:%S")
-                print_summary_line(
-                    data,
-                    cid,
-                    monitored=(cid in settings.customer_ids),
-                    ts=ts,
-                    margin_below=g.margin_below,
-                    margin_above=g.margin_above,
-                )
-                m = data.get("margin")
-                b = data.get("billed_min")
-                try:
-                    insert_margin(
-                        MarginRecord(
-                            customer_id=cid,
-                            customer_name=str(data.get("name", "N/A")),
-                            margin=float(m) if isinstance(m, (int, float)) else None,
-                            billed_min=float(b) if isinstance(b, (int, float)) else None,
-                        )
-                    )
-                except Exception as e:
-                    logging.error(f"DB insert margin failed for {cid}: {e}")
+            process_summary(summary, mgr, settings, state, runtime, {})
         else:
-            print(f"  {dim('No data' + (f' — {err}' if err else ''))}")
+            _qprint(quiet, f"  {dim('No data' + (f' — {err}' if err else ''))}")
     finally:
         session.close()
-        print()
+        _qprint(quiet)
 
 
 def _try_hot_reload(current: Settings, args: Args) -> Settings:
@@ -232,7 +184,6 @@ def _try_hot_reload(current: Settings, args: Args) -> Settings:
             parts_str += f" (+{len(global_changes) - 3} more)"
         print(f"  {cyan('[RELOAD]')} Settings: {parts_str}")
         logging.info(f"Hot-reload settings: {parts_str}")
-        configure_scrapers(new_settings.global_)
 
     print(f"  {cyan('[RELOAD]')} Settings reloaded (v{get_settings_version()})")
     return new_settings
@@ -259,15 +210,8 @@ def monitor_loop(settings: Settings, args: Args, runtime: Runtime) -> None:
             return
 
         init_db()
-        configure_scrapers(g)
 
-        mgr = SirenManager(
-            siren_loops=g.siren_loops,
-            siren_min_freq=g.siren_min_freq,
-            siren_max_freq=g.siren_max_freq,
-            siren_step_freq=g.siren_step_freq,
-            siren_tone_duration=g.siren_tone_duration,
-        )
+        mgr = SirenManager()
 
         state.set_cycle(interval=interval, settings_version=get_settings_version())
         dashboard = create_dashboard(state, settings)
@@ -385,7 +329,7 @@ def main() -> None:
         render_status()
         sys.exit(0)
 
-    if args.get("tail"):
+    if "tail" in args:
         render_tail(int(args["tail"]))
         sys.exit(0)
 
@@ -446,7 +390,7 @@ def main() -> None:
 
     if args.get("run_once"):
         runtime.record_cycle(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        run_once(settings)
+        run_once(settings, quiet=bool(args.get("quiet")))
         sys.exit(0)
 
     monitor_loop(settings, args, runtime)

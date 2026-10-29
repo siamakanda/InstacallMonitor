@@ -4,6 +4,22 @@
 
 Real-time balance and margin monitoring for the Instacall Switch Portal. Alerts via desktop notifications and audible sirens when thresholds are breached.
 
+## Install (Windows, no Python required)
+
+1. Download `InstacallMonitor.exe` (from the Releases page, or build it with `build_exe.bat`).
+2. Put it in its own folder and create a `.env` file beside it:
+   ```
+   PORTAL_USERNAME="your_username"
+   PORTAL_PASSWORD="your_password"
+   ```
+3. Double-click `InstacallMonitor.exe`.
+
+On first run it writes `settings.toml` next to the exe — edit that (or use the web dashboard) to set
+thresholds and monitored customers. `settings.toml`, the SQLite history, the log and the status file
+all live beside the executable.
+
+> The exe is unsigned, so Windows SmartScreen may warn on first launch ("More info" → "Run anyway").
+
 ## Quick Start (Any Device)
 
 ```bash
@@ -44,7 +60,7 @@ python monitor.py
 - **Margin range with deadband** — alerts fire when margin is outside a normal range (e.g. 30%–75%). A deadband zone prevents alert/recovery flapping near thresholds.
 - **Direction-aware margin alerts** — distinct siren patterns: alternating two-tone for margin too low, steady pulse for margin too high
 - **Per-customer thresholds** — global defaults + per-customer overrides for balance, margin range, deadband, and billed min
-- **Escalation** — two-tier thresholds with persistent alert state across restarts, auto-recovery when values return to range
+- **Escalation** — repeated breaches escalate with persistent alert state across restarts, auto-recovery when values return to range
 - **Triple siren patterns** — rising/falling sweep (balance), alternating two-tone (margin low), steady pulse (margin high)
 - **Non-blocking alerts** — sirens play in background threads, monitoring continues
 - **Desktop notifications** — Windows toast notifications via `plyer`
@@ -54,7 +70,7 @@ python monitor.py
 - **SQLite history** — persistent balance, margin, and alert_state tables with auto-retention
 - **CSV export** — export balance/margin history for reporting
 - **Circuit breaker** — automatic circuit breaking for balance and summary report endpoints to avoid hammering the server on failures
-- **Retry with backoff** — configurable exponential backoff with jitter for transient errors
+- **Retry with backoff** — exponential backoff with jitter for transient errors
 - **Hot-reload** — settings reloaded from `settings.toml` without restart
 - **DB dedup** — skips duplicate inserts when values haven't changed
 - **Priority-aware display** — balance lines `[B]`, margin lines `[M]`, monitored flag, color-coded by threshold range
@@ -87,6 +103,9 @@ Installing the project (`pip install .`) also exposes the same interface as the
 | `--no-hot-reload` | Disable settings hot-reload |
 | `--no-web` | Disable the web dashboard |
 | `--web-port N` | Override the dashboard port |
+| `--status` | Show monitor health status and exit |
+| `--tail N` | Show the last N log entries and exit |
+| `--help` | Show all options |
 
 ## Web Dashboard
 
@@ -102,16 +121,15 @@ A dependency-free dashboard (Python stdlib only) starts automatically alongside 
 Dashboard  http://127.0.0.1:8765
 ```
 
-Configure or disable it in `settings.toml` (`web_dashboard`, `web_dashboard_host`, `web_dashboard_port`,
-`web_dashboard_refresh`) or via `--no-web` / `--web-port N`. It is **loopback-only**: a non-loopback
-`web_dashboard_host` (e.g. `0.0.0.0`) is rejected at startup and falls back to `127.0.0.1`. The dashboard
-has no authentication, so do not put it behind a public proxy.
+Configure or disable it in `settings.toml` (`web_dashboard`, `web_dashboard_port`,
+`web_dashboard_refresh`) or via `--no-web` / `--web-port N`. It is **always loopback-only** (binds
+`127.0.0.1`) and has no authentication, so do not put it behind a public proxy.
 
 ### Editing settings
 
 Everything is edited in place:
 
-- **Settings** — every global value, grouped (General, Thresholds, Sirens, Resilience, Dashboard). Invalid
+- **Settings** — every global value, grouped (General, Thresholds, Dashboard). Invalid
   values are underlined with the specific error shown under the field.
 - **Balance-check customers** — an input + dropdown table. Pick a known customer from the list or type an
   ID, set `balance_below` (required) and any per-customer overrides, then add or remove rows. Override
@@ -122,12 +140,12 @@ Everything is edited in place:
 
 Saving writes `settings.toml` (keeping a `settings.toml.bak` copy and the file's comments), validates the
 values first, and wakes the monitor so hot-reload applies them within about a second — no restart needed,
-except for a changed dashboard host/port (shown as a warning).
+except for a changed dashboard port (shown as a warning).
 
 Writes go through `POST /api/settings`, which requires a JSON content type, a same-origin request, and the
 page's CSRF token (`X-CSRF-Token`), so another web page in your browser cannot silently rewrite your config.
 
-The JSON endpoints it serves can also be scraped directly: `/api/status`, `/api/customers`,
+The JSON endpoints it serves can also be scraped directly: `/api/status`,
 `/api/history?customer_id=ID&hours=24&limit=500`, `/api/alerts`, and `GET`/`POST /api/settings`.
 `GET /api/settings` returns `{"ok": true, "settings": {…global…}, "watch": […]}`.
 
@@ -161,29 +179,27 @@ Settings live in `settings.toml` (TOML format). Edit directly.
 [settings]
 check_interval = 600              # seconds between monitoring cycles
 request_timeout = 10              # HTTP request timeout (seconds)
-cooldown = 300                    # minimum seconds between alerts per customer
 audio = true                      # enable audible siren alerts
+cooldown = 300                    # minimum seconds between alerts per customer
+db_retention_days = 30            # auto-purge (0 = keep forever)
 summary_direction = "outbound"    # "outbound" or "inbound"
 summary_interval = "5m"           # "5m", "10m", "15m", "1h", etc.
-db_retention_days = 30            # auto-purge (0 = keep forever)
-siren_loops = 10                  # siren repetition count
-siren_min_freq = 2200             # lowest siren frequency (Hz)
-siren_max_freq = 3500             # highest siren frequency (Hz)
-siren_step_freq = 130             # frequency step between beeps (Hz)
-siren_tone_duration = 50          # duration of each beep (ms)
-
-# Web dashboard (stdlib HTTP server, localhost by default)
-web_dashboard = true              # enable the built-in dashboard
-web_dashboard_host = "127.0.0.1"  # bind address
-web_dashboard_port = 8765         # dashboard port
-web_dashboard_refresh = 5         # browser auto-refresh interval (seconds)
+max_workers = 4                   # concurrent worker threads for scraping
 
 # Global defaults (applied to ALL customers in summary report)
 margin_below = 30.0               # alert when margin drops below this %
 margin_above = 75.0               # alert when margin surges above this %
 margin_deadband = 3.0             # must recover this far inside range before clearing alert
 billed_above = 70.0               # only alert if billed minutes exceed this
+
+# Web dashboard (stdlib HTTP server, always loopback-only)
+web_dashboard = true              # enable the built-in dashboard
+web_dashboard_port = 8765         # dashboard port
+web_dashboard_refresh = 5         # browser auto-refresh interval (seconds)
 ```
+
+Siren tones and the retry/circuit-breaker resilience tuning are fixed in code (`siren.py`,
+`scraper_client.py`) rather than exposed as settings.
 
 ### Monitored customers (`[[watch]]`)
 
@@ -194,7 +210,6 @@ Each block specifies a customer with its own balance threshold. All other fields
 customer = "18"
 name = "ACME Corp"
 balance_below = -500.0            # REQUIRED — balance alert for this customer
-# balance_critical = -600.0       # optional escalation
 
 [[watch]]
 customer = "42"
@@ -228,7 +243,8 @@ InstacallMonitor/
   runtime.py            — Shared Runtime state (shutdown event, counters, health snapshot)
   health.py             — monitor.status write/read, --status and --tail rendering
   config.py             — Settings facade: paths, TOML load/save/reload (re-exports below)
-  settings_models.py    — Settings dataclasses + value coercion
+  settings_models.py    — Settings dataclasses, value coercion, and FIELD_SPEC (drives the
+                          settings.toml template + the web form)
   settings_validation.py— Settings validation
   credentials.py        — .env credential loading
   settings_diff.py      — Settings change detection for hot-reload
@@ -247,8 +263,20 @@ InstacallMonitor/
   circuit_breaker.py    — Circuit breaker pattern for resilient HTTP requests
   settings.toml         — Runtime configuration (global + per-customer overrides)
   .env                  — Portal credentials (never committed)
-  tests/                — 210 pytest tests
+  packaging/            — PyInstaller spec for the Windows .exe
+  build_exe.bat         — One-click Windows executable build
+  tests/                — pytest suite
 ```
+
+## Building the Windows executable
+
+```bash
+build_exe.bat          # creates venv, installs deps, runs PyInstaller
+```
+
+This produces `dist\InstacallMonitor.exe` (single file, no Python needed). Ship it with a `.env` file
+beside it. The PyInstaller spec lives in `packaging/InstacallMonitor.spec`; CI builds the same artifact on
+tagged pushes via `.github/workflows/build-exe.yml`.
 
 ## Files (Runtime)
 

@@ -5,24 +5,19 @@ import time
 
 import audio
 
+# Siren tone parameters — fixed rather than user-configurable.
+_SIREN_LOOPS = 10
+_SIREN_MIN_FREQ = 2200
+_SIREN_MAX_FREQ = 3500
+_SIREN_STEP_FREQ = 130
+_SIREN_TONE_DURATION = 50
+
 
 class SirenManager:
-    def __init__(
-        self,
-        siren_loops: int = 10,
-        siren_min_freq: int = 2200,
-        siren_max_freq: int = 3500,
-        siren_step_freq: int = 130,
-        siren_tone_duration: int = 50,
-    ) -> None:
+    def __init__(self) -> None:
         self._lock = threading.Lock()
         self._playing = False
         self._timestamps: dict[str, float] = {}
-        self.siren_loops = siren_loops
-        self.siren_min_freq = siren_min_freq
-        self.siren_max_freq = siren_max_freq
-        self.siren_step_freq = siren_step_freq
-        self.siren_tone_duration = siren_tone_duration
 
     @property
     def is_playing(self) -> bool:
@@ -55,16 +50,16 @@ class SirenManager:
     def play_rising_falling(self) -> None:
         audio.play(
             audio.build_rising_falling(
-                self.siren_min_freq,
-                self.siren_max_freq,
-                self.siren_step_freq,
-                self.siren_tone_duration,
-                self.siren_loops,
+                _SIREN_MIN_FREQ,
+                _SIREN_MAX_FREQ,
+                _SIREN_STEP_FREQ,
+                _SIREN_TONE_DURATION,
+                _SIREN_LOOPS,
             )
         )
 
     def play_alternating(self) -> None:
-        audio.play(audio.build_alternating(self.siren_min_freq, self.siren_max_freq, 100, self.siren_loops))
+        audio.play(audio.build_alternating(_SIREN_MIN_FREQ, _SIREN_MAX_FREQ, 100, _SIREN_LOOPS))
 
     def play_steady(self) -> None:
-        audio.play(audio.build_steady(self.siren_min_freq, 100, 100, self.siren_loops * 4))
+        audio.play(audio.build_steady(_SIREN_MIN_FREQ, 100, 100, _SIREN_LOOPS * 4))

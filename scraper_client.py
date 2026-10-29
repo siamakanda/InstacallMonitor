@@ -13,12 +13,26 @@ import requests
 
 from auth import perform_login
 from circuit_breaker import CircuitBreaker
-from config import BASE_EDIT_URL, SUMMARY_REPORT_URL, GlobalSettings, Settings
+from config import BASE_EDIT_URL, SUMMARY_REPORT_URL, Settings
 from scraper_parser import BalanceResult, SummaryDict, parse_customer_page, parse_summary_page
 
-_RETRY_DELAYS = [2, 5]
+# Advanced resilience tuning — deliberately fixed rather than user-configurable.
+_RETRY_ATTEMPTS = 3
+_RETRY_BASE_DELAY = 1.0
+_RETRY_MAX_DELAY = 30.0
+_RETRY_JITTER_MAX = 1.0
 _NON_TRANSIENT_DELAY = 0.5
+_CIRCUIT_FAILURE_THRESHOLD = 5
+_CIRCUIT_RECOVERY_TIMEOUT = 60.0
 _RELOGIN_LOCK = threading.Lock()
+
+
+def _retry_delays() -> list[float]:
+    delays: list[float] = []
+    for attempt in range(1, _RETRY_ATTEMPTS):
+        delay = min(_RETRY_BASE_DELAY * (2 ** (attempt - 1)), _RETRY_MAX_DELAY)
+        delays.append(delay + random.uniform(0, _RETRY_JITTER_MAX))
+    return delays
 
 
 def _needs_relogin(response: requests.Response) -> bool:
@@ -36,27 +50,16 @@ class ScraperClient:
     """HTTP fetch layer: owns the circuit breakers and the retry policy."""
 
     def __init__(self) -> None:
-        self._balance_breaker = CircuitBreaker(name="balance")
-        self._summary_breaker = CircuitBreaker(name="summary_report")
-        self._retry_settings: Optional[GlobalSettings] = None
-
-    def configure(self, settings: GlobalSettings) -> None:
-        self._retry_settings = settings
-        self._balance_breaker.failure_threshold = settings.circuit_failure_threshold
-        self._balance_breaker.recovery_timeout = settings.circuit_recovery_timeout
-        self._summary_breaker.failure_threshold = settings.circuit_failure_threshold
-        self._summary_breaker.recovery_timeout = settings.circuit_recovery_timeout
-
-    def _compute_retry_delays(self) -> list[float]:
-        s = self._retry_settings
-        if s is None:
-            return list(_RETRY_DELAYS)
-        delays: list[float] = []
-        for attempt in range(1, s.retry_max_attempts):
-            delay = min(s.retry_base_delay * (2 ** (attempt - 1)), s.retry_max_delay)
-            jitter = random.uniform(0, s.retry_jitter_max)
-            delays.append(delay + jitter)
-        return delays
+        self._balance_breaker = CircuitBreaker(
+            name="balance",
+            failure_threshold=_CIRCUIT_FAILURE_THRESHOLD,
+            recovery_timeout=_CIRCUIT_RECOVERY_TIMEOUT,
+        )
+        self._summary_breaker = CircuitBreaker(
+            name="summary_report",
+            failure_threshold=_CIRCUIT_FAILURE_THRESHOLD,
+            recovery_timeout=_CIRCUIT_RECOVERY_TIMEOUT,
+        )
 
     def _relogin(self, session: requests.Session, timeout: int) -> bool:
         # Serialise re-logins: worker threads share one Session, so concurrent
@@ -68,7 +71,7 @@ class ScraperClient:
         edit_url = f"{BASE_EDIT_URL}{quote(customer_id, safe='')}"
         last_error: Optional[str] = None
 
-        retry_delays = self._compute_retry_delays()
+        retry_delays = _retry_delays()
         total_attempts = 1 + len(retry_delays)
 
         for attempt in range(total_attempts):
@@ -147,7 +150,7 @@ class ScraperClient:
         }
         last_error: Optional[str] = None
 
-        retry_delays = self._compute_retry_delays()
+        retry_delays = _retry_delays()
         total_attempts = 1 + len(retry_delays)
 
         for attempt in range(total_attempts):

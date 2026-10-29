@@ -77,12 +77,11 @@ class TestMonitorState:
 
     def test_reload_signalling(self) -> None:
         state = MonitorState()
-        assert state.reload_requested() is False
+        assert state.reload_event.is_set() is False
         state.request_reload()
-        assert state.reload_requested() is True
-        assert state.reload_event.is_set()
+        assert state.reload_event.is_set() is True
         state.clear_reload()
-        assert state.reload_requested() is False
+        assert state.reload_event.is_set() is False
 
     def test_stores_unmonitored_customers(self) -> None:
         state = MonitorState()
@@ -93,9 +92,9 @@ class TestMonitorState:
 
 
 class TestDashboard:
-    def _settings(self, port: int = 0, host: str = "127.0.0.1") -> Settings:
+    def _settings(self, port: int = 0) -> Settings:
         return Settings(
-            global_=GlobalSettings(web_dashboard=True, web_dashboard_host=host, web_dashboard_port=port),
+            global_=GlobalSettings(web_dashboard=True, web_dashboard_port=port),
             watch=[WatchTarget(customer="18", balance_below=-500.0)],
         )
 
@@ -105,14 +104,6 @@ class TestDashboard:
             watch=[WatchTarget(customer="18", balance_below=-500.0)],
         )
         assert create_dashboard(MonitorState(), settings) is None
-
-    def test_non_loopback_host_falls_back_to_localhost(self) -> None:
-        handle = create_dashboard(MonitorState(), self._settings(host="0.0.0.0"))
-        assert handle is not None
-        try:
-            assert handle.url.startswith("http://127.0.0.1:")
-        finally:
-            handle.stop()
 
     def test_endpoints(self, temp_db: str) -> None:
         persistence.insert_balance(
@@ -133,9 +124,6 @@ class TestDashboard:
             status, data = _fetch_json(base + "/api/status")
             assert status == 200
             assert data["customers"][0]["customer_id"] == "18"
-
-            _, data = _fetch_json(base + "/api/customers")
-            assert data["customers"][0]["name"] == "TestCo"
 
             _, data = _fetch_json(base + "/api/history?customer_id=18&hours=24")
             assert len(data["balance"]) == 1
@@ -233,7 +221,7 @@ class TestSettingsEditor:
             status, data = _post_json(handle.url + "/api/settings", payload, token=handle.csrf_token)
             assert status == 200
             assert data["ok"] is True
-            assert state.reload_requested() is True
+            assert state.reload_event.is_set() is True
             assert config.read_settings().global_.margin_below == 22.0
         finally:
             handle.stop()
@@ -305,27 +293,5 @@ class TestSettingsEditor:
             status, data = _post_json(handle.url + "/api/settings", payload, token=handle.csrf_token)
             assert status == 200
             assert any("restart" in w.lower() for w in data["warnings"])
-        finally:
-            handle.stop()
-
-    def test_empty_text_field_is_validated_not_silently_dropped(self, temp_settings: Path) -> None:
-        handle = self._start(MonitorState())
-        try:
-            payload = self._payload(handle)
-            payload["settings"]["web_dashboard_host"] = ""
-            status, data = _post_json(handle.url + "/api/settings", payload, token=handle.csrf_token)
-            assert status == 400
-            assert any("web_dashboard_host" in e for e in data["errors"])
-        finally:
-            handle.stop()
-
-    def test_non_loopback_host_rejected_on_save(self, temp_settings: Path) -> None:
-        handle = self._start(MonitorState())
-        try:
-            payload = self._payload(handle)
-            payload["settings"]["web_dashboard_host"] = "0.0.0.0"
-            status, data = _post_json(handle.url + "/api/settings", payload, token=handle.csrf_token)
-            assert status == 400
-            assert any(fe["field"] == "web_dashboard_host" for fe in data["field_errors"])
         finally:
             handle.stop()

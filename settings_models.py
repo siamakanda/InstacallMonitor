@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ipaddress
 import math
 from dataclasses import dataclass, field, fields
 from typing import Any, Optional, TypeGuard, get_type_hints
@@ -43,17 +42,6 @@ def is_finite_number(value: object) -> TypeGuard[int | float]:
     return is_number(value) and math.isfinite(float(value))
 
 
-def is_loopback_host(host: str) -> bool:
-    """True for 127.0.0.0/8, ::1 and the name 'localhost'."""
-    candidate = host.strip().lower()
-    if candidate == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(candidate).is_loopback
-    except ValueError:
-        return False
-
-
 @dataclass
 class GlobalSettings:
     check_interval: int = 600
@@ -67,20 +55,8 @@ class GlobalSettings:
     margin_above: float = 75.0
     margin_deadband: float = 3.0
     billed_above: float = 70.0
-    siren_loops: int = 10
-    siren_min_freq: int = 2200
-    siren_max_freq: int = 3500
-    siren_step_freq: int = 130
-    siren_tone_duration: int = 50
     max_workers: int = 4
-    retry_max_attempts: int = 3
-    retry_base_delay: float = 1.0
-    retry_max_delay: float = 30.0
-    retry_jitter_max: float = 1.0
-    circuit_failure_threshold: int = 5
-    circuit_recovery_timeout: float = 60.0
     web_dashboard: bool = True
-    web_dashboard_host: str = "127.0.0.1"
     web_dashboard_port: int = 8765
     web_dashboard_refresh: int = 5
 
@@ -95,6 +71,52 @@ class GlobalSettings:
             if k in field_names:
                 filtered[k] = _coerce(v, field_types.get(k))
         return cls(**filtered)
+
+
+@dataclass(frozen=True)
+class FieldSpec:
+    """One editable ``[settings]`` field.
+
+    Single source of truth: drives both the generated ``settings.toml`` template
+    (config.py) and the web dashboard form (dashboard_ui.py).
+    """
+
+    name: str
+    label: str
+    group: str
+    kind: str  # "int" | "float" | "bool" | "text" | "select"
+    comment: str = ""
+    options: tuple[str, ...] = ()
+
+
+FIELD_SPEC: tuple[FieldSpec, ...] = (
+    FieldSpec("check_interval", "Check interval (s)", "General", "int", "Interval between check cycles, in seconds"),
+    FieldSpec("request_timeout", "Request timeout (s)", "General", "int", "HTTP request timeout, in seconds"),
+    FieldSpec("audio", "Audio sirens", "General", "bool", "Enable audible siren alerts"),
+    FieldSpec("cooldown", "Alert cooldown (s)", "General", "int", "Minimum seconds between repeated alerts"),
+    FieldSpec("db_retention_days", "DB retention (days)", "General", "int", "Days of history to keep in the database"),
+    FieldSpec(
+        "summary_direction",
+        "Summary direction",
+        "General",
+        "select",
+        'Summary direction: "outbound" or "inbound"',
+        ("outbound", "inbound"),
+    ),
+    FieldSpec("summary_interval", "Summary interval", "General", "text", 'Summary interval: "5m", "15m", "1h" etc.'),
+    FieldSpec("max_workers", "Max workers", "General", "int", "Number of concurrent worker threads for scraping"),
+    FieldSpec("margin_below", "Margin below (%)", "Thresholds", "float", "Margin below this % triggers a low alert"),
+    FieldSpec("margin_above", "Margin above (%)", "Thresholds", "float", "Margin above this % triggers a high alert"),
+    FieldSpec(
+        "margin_deadband", "Margin deadband (%)", "Thresholds", "float", "Recovery deadband prevents alert flapping"
+    ),
+    FieldSpec(
+        "billed_above", "Billed above (min)", "Thresholds", "float", "Only alert when billed minutes exceed this"
+    ),
+    FieldSpec("web_dashboard", "Dashboard enabled", "Dashboard", "bool", "Serve the local HTTP dashboard"),
+    FieldSpec("web_dashboard_port", "Dashboard port", "Dashboard", "int", "Dashboard port (loopback only)"),
+    FieldSpec("web_dashboard_refresh", "Refresh (s)", "Dashboard", "int", "Browser auto-refresh interval, in seconds"),
+)
 
 
 @dataclass

@@ -32,7 +32,6 @@ class Portal:
 
         monkeypatch.setattr(app.auth, "create_session", lambda: self.session)
         monkeypatch.setattr(app, "_login_with_spinner", lambda session, timeout: True)
-        monkeypatch.setattr(app, "configure_scrapers", lambda g: None)
         monkeypatch.setattr(app, "fetch_balance", self._fetch_balance)
         monkeypatch.setattr(app, "fetch_summary_report", lambda session, settings: self.summary)
         monkeypatch.setattr(app, "create_dashboard", self._create_dashboard)

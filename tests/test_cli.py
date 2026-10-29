@@ -26,9 +26,10 @@ class TestParseArgs:
         args = parse_args(["--web-port", "not-a-number"])
         assert "web_port" not in args
 
-    def test_tail_defaults_on_invalid(self) -> None:
+    def test_tail_invalid_warns_and_ignores(self, capsys: pytest.CaptureFixture[str]) -> None:
         args = parse_args(["--tail", "nope"])
-        assert args["tail"] == 20
+        assert "tail" not in args
+        assert "Invalid value" in capsys.readouterr().out
 
     def test_unknown_flag_warns(self, capsys: pytest.CaptureFixture[str]) -> None:
         args = parse_args(["--nope"])
@@ -90,14 +91,21 @@ class TestSleepInterruptible:
         wake = threading.Event()
         wake.set()
         started = time.time()
-        assert app._sleep_interruptible(30, shutdown, wake) is True
+        app._sleep_interruptible(30, shutdown, wake)
         assert time.time() - started < 3
 
     def test_returns_after_short_sleep_without_event(self) -> None:
         shutdown = threading.Event()
         started = time.time()
-        assert app._sleep_interruptible(1, shutdown) is False
+        app._sleep_interruptible(1, shutdown)
         assert time.time() - started >= 1
+
+    def test_wakes_when_shutdown_set(self) -> None:
+        shutdown = threading.Event()
+        shutdown.set()
+        started = time.time()
+        app._sleep_interruptible(30, shutdown)
+        assert time.time() - started < 3
 
 
 class TestRuntime:

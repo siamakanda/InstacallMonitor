@@ -1,11 +1,29 @@
 from __future__ import annotations
 
+from dataclasses import fields
 from pathlib import Path
 
 import pytest
 
 import config
 from config import GlobalSettings, Settings, WatchTarget, read_settings, save_settings, validate_settings
+from settings_models import FIELD_SPEC
+
+
+class TestFieldSpec:
+    def test_spec_covers_every_global_field(self) -> None:
+        field_names = {f.name for f in fields(GlobalSettings)}
+        spec_names = {s.name for s in FIELD_SPEC}
+        assert spec_names == field_names
+
+    def test_generated_template_round_trips(self, tmp_path: Path, monkeypatch) -> None:
+        path = tmp_path / "settings.toml"
+        monkeypatch.setattr(config, "SETTINGS_FILE", str(path))
+        monkeypatch.setattr(config, "_BASE_DIR", tmp_path)
+        config.load_settings()  # writes the generated template
+        reloaded = read_settings()
+        assert reloaded.global_ == GlobalSettings()
+        assert sorted(reloaded.global_.__dict__) == sorted(s.name for s in FIELD_SPEC)
 
 
 class TestGlobalSettings:
@@ -158,7 +176,6 @@ class TestSettings:
     def test_web_dashboard_defaults(self) -> None:
         g = GlobalSettings()
         assert g.web_dashboard is True
-        assert g.web_dashboard_host == "127.0.0.1"
         assert g.web_dashboard_port == 8765
         assert g.web_dashboard_refresh == 5
 
@@ -241,7 +258,7 @@ class TestSettingsFilePersistence:
 
         content = path.read_text(encoding="utf-8")
         assert "# Interval between check cycles, in seconds" in content
-        assert "# Margin below this percentage triggers low-margin alert" in content
+        assert "# Margin below this % triggers a low alert" in content
 
         reloaded = read_settings()
         assert reloaded.global_.check_interval == 120
@@ -290,18 +307,18 @@ class TestSettingsFilePersistence:
 
     def test_save_settings_escapes_special_characters(self, tmp_path: Path, monkeypatch) -> None:
         self._isolate(tmp_path, monkeypatch)
-        nasty_host = '127.0.0.1"\nfoo = "bar'
+        nasty_val = '127.0.0.1"\nfoo = "bar'
         nasty_name = 'ACME "Corp"\n[[watch]]'
 
         save_settings(
             Settings(
-                global_=GlobalSettings(web_dashboard_host=nasty_host),
+                global_=GlobalSettings(summary_interval=nasty_val),
                 watch=[WatchTarget(customer="18", name=nasty_name, balance_below=-500.0)],
             )
         )
 
         reloaded = read_settings()
-        assert reloaded.global_.web_dashboard_host == nasty_host
+        assert reloaded.global_.summary_interval == nasty_val
         assert reloaded.get_watch("18").name == nasty_name
 
 
@@ -329,22 +346,6 @@ class TestValidateHardening:
     def test_inf_interval_rejected(self) -> None:
         errors = validate_settings(self._settings(check_interval=float("inf")))
         assert any("check_interval" in e for e in errors)
-
-    def test_host_with_control_chars_rejected(self) -> None:
-        errors = validate_settings(self._settings(web_dashboard_host="127.0.0.1\n"))
-        assert any("web_dashboard_host" in e for e in errors)
-
-    def test_non_loopback_host_rejected(self) -> None:
-        errors = validate_settings(self._settings(web_dashboard_host="0.0.0.0"))
-        assert any("loopback" in e for e in errors)
-
-    def test_loopback_hosts_accepted(self) -> None:
-        for host in ("127.0.0.1", "localhost", "::1"):
-            assert validate_settings(self._settings(web_dashboard_host=host)) == []
-
-    def test_negative_retry_base_delay_rejected(self) -> None:
-        errors = validate_settings(self._settings(retry_base_delay=-1.0))
-        assert any("retry_base_delay" in e for e in errors)
 
     def test_interval_upper_bound_enforced(self) -> None:
         errors = validate_settings(self._settings(check_interval=10**9))

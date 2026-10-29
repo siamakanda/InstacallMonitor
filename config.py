@@ -3,17 +3,21 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import sys
 import tempfile
 import threading
-from dataclasses import fields
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-import tomli as tomllib
+try:  # Python 3.11+
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
 
 from credentials import get_credentials
 from settings_models import (
     DEFAULT_BALANCE_BELOW,
+    FIELD_SPEC,
     GlobalSettings,
     Settings,
     WatchTarget,
@@ -64,103 +68,66 @@ HEADERS: dict[str, str] = {
 }
 
 _BASE_DIR = Path(__file__).resolve().parent
+# A PyInstaller one-file build unpacks to a temp dir, so runtime files (settings,
+# DB, log, status) must live next to the executable to persist between runs.
+RUNTIME_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else _BASE_DIR
 
-LOG_FILE = str(_BASE_DIR / "balance_monitor.log")
-SETTINGS_FILE = str(_BASE_DIR / "settings.toml")
-DB_FILE = str(_BASE_DIR / "instacallmonitor.db")
+LOG_FILE = str(RUNTIME_DIR / "balance_monitor.log")
+SETTINGS_FILE = str(RUNTIME_DIR / "settings.toml")
+DB_FILE = str(RUNTIME_DIR / "instacallmonitor.db")
 
-_SETTINGS_TEMPLATE = """\
-# InstacallMonitor Settings
-# Edit this file to configure monitoring thresholds and watch targets.
-# Changes take effect on the next check cycle (hot-reload).
 
-[settings]
-# Interval between check cycles, in seconds
-check_interval = 600
-# HTTP request timeout, in seconds
-request_timeout = 10
-# Enable audible siren alerts (Windows only)
-audio = true
-# Minimum seconds between repeated alerts for the same customer
-cooldown = 300
-# Days of history to keep in the database
-db_retention_days = 30
-# Summary direction: "outbound" or "inbound"
-summary_direction = "outbound"
-# Summary interval: "5m", "15m", "1h", "24h" etc.
-summary_interval = "5m"
-# Margin below this percentage triggers low-margin alert
-margin_below = 30.0
-# Margin above this percentage triggers high-margin alert
-margin_above = 75.0
-# Recovery deadband prevents alert flapping (must be < half the margin range)
-margin_deadband = 3.0
-# Only alert when billed minutes exceed this value
-billed_above = 70.0
-# Number of concurrent worker threads for scraping
-max_workers = 4
-# Siren sound parameters
-siren_loops = 10
-siren_min_freq = 2200
-siren_max_freq = 3500
-siren_step_freq = 130
-siren_tone_duration = 50
-# Retry behaviour for transient failures
-retry_max_attempts = 3
-retry_base_delay = 1.0
-retry_max_delay = 30.0
-retry_jitter_max = 1.0
-# Circuit breaker — opens after N consecutive failures, recovers after timeout
-circuit_failure_threshold = 5
-circuit_recovery_timeout = 60.0
-# Web dashboard — local HTTP UI for live balances, margins and history
-web_dashboard = true
-web_dashboard_host = "127.0.0.1"
-web_dashboard_port = 8765
-web_dashboard_refresh = 5
+def _toml_str(value: str) -> str:
+    escaped = (
+        value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+    )
+    return f'"{escaped}"'
 
-# Add one [[watch]] block for each customer to monitor.
-# The "customer" field is the numeric customer ID from the Instacall portal.
-# All other fields are optional overrides of the global defaults above.
 
-[[watch]]
-customer = "18"
-name = ""
-balance_below = -500.0
-"""
+def _toml_literal(value: object) -> str:
+    if isinstance(value, bool):
+        return str(value).lower()
+    if isinstance(value, str):
+        return _toml_str(value)
+    return str(value)
+
+
+def _generate_template() -> str:
+    """Render the default settings.toml from the single FIELD_SPEC definition."""
+    defaults = GlobalSettings()
+    lines = [
+        "# InstacallMonitor Settings",
+        "# Edit this file to configure monitoring thresholds and watch targets.",
+        "# Changes take effect on the next check cycle (hot-reload).",
+        "",
+        "[settings]",
+    ]
+    group = ""
+    for spec in FIELD_SPEC:
+        if spec.group != group:
+            lines.append("")
+            group = spec.group
+        if spec.comment:
+            lines.append(f"# {spec.comment}")
+        lines.append(f"{spec.name} = {_toml_literal(getattr(defaults, spec.name))}")
+    lines += [
+        "",
+        "# Add one [[watch]] block for each customer to monitor.",
+        '# The "customer" field is the numeric customer ID from the Instacall portal.',
+        "# All other fields are optional overrides of the global defaults above.",
+        "",
+        "[[watch]]",
+        'customer = "18"',
+        'name = ""',
+        "balance_below = -500.0",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+_SETTINGS_TEMPLATE = _generate_template()
 _settings_mtime: float = 0.0
 _settings_version: int = 0
 _settings_lock = threading.Lock()
-
-
-def _extract_global_comments() -> dict[str, str]:
-    comments: dict[str, str] = {}
-    pending: list[str] = []
-    in_settings = False
-    for raw in _SETTINGS_TEMPLATE.splitlines():
-        stripped = raw.strip()
-        if stripped == "[settings]":
-            in_settings = True
-            pending = []
-            continue
-        if not in_settings:
-            continue
-        if stripped.startswith("["):
-            break
-        if stripped.startswith("#"):
-            pending.append(raw.rstrip())
-            continue
-        if "=" in stripped:
-            name = stripped.split("=", 1)[0].strip()
-            if pending:
-                comments[name] = "\n".join(pending)
-                pending = []
-            continue
-        pending = []
-    return comments
-
-
-_GLOBAL_COMMENTS: dict[str, str] = _extract_global_comments()
 
 
 def get_settings_mtime() -> float:
@@ -244,13 +211,6 @@ def reload_settings(current: Settings) -> Settings | None:
     return new_settings
 
 
-def _toml_str(value: str) -> str:
-    escaped = (
-        value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
-    )
-    return f'"{escaped}"'
-
-
 def save_settings(settings: Settings) -> None:
     if os.path.exists(SETTINGS_FILE):
         try:
@@ -265,17 +225,14 @@ def save_settings(settings: Settings) -> None:
         "",
         "[settings]",
     ]
-    for f in fields(GlobalSettings):
-        comment = _GLOBAL_COMMENTS.get(f.name)
-        if comment:
-            lines.append(comment)
-        val = getattr(settings.global_, f.name)
-        if isinstance(val, str):
-            lines.append(f"{f.name} = {_toml_str(val)}")
-        elif isinstance(val, bool):
-            lines.append(f"{f.name} = {str(val).lower()}")
-        else:
-            lines.append(f"{f.name} = {val}")
+    group = ""
+    for spec in FIELD_SPEC:
+        if spec.group != group:
+            lines.append("")
+            group = spec.group
+        if spec.comment:
+            lines.append(f"# {spec.comment}")
+        lines.append(f"{spec.name} = {_toml_literal(getattr(settings.global_, spec.name))}")
 
     lines.append("")
     lines.append("# Add one [[watch]] block for each customer to monitor.")
@@ -297,7 +254,10 @@ def save_settings(settings: Settings) -> None:
     content = "\n".join(lines) + "\n"
     tmp_path = ""
     try:
-        with tempfile.NamedTemporaryFile(mode="w", dir=_BASE_DIR, delete=False, suffix=".tmp", encoding="utf-8") as tmp:
+        target_dir = os.path.dirname(os.path.abspath(SETTINGS_FILE)) or "."
+        with tempfile.NamedTemporaryFile(
+            mode="w", dir=target_dir, delete=False, suffix=".tmp", encoding="utf-8"
+        ) as tmp:
             tmp.write(content)
             tmp_path = tmp.name
         os.replace(tmp_path, SETTINGS_FILE)
